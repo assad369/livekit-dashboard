@@ -3,6 +3,7 @@
 from fastapi import APIRouter, Depends, Request, Form
 from fastapi.responses import HTMLResponse, RedirectResponse
 
+from app.services import store
 from app.services import alerts as alert_service
 from app.services import notifications
 from app.services.dashboard import gather_dashboard_stats
@@ -20,11 +21,11 @@ async def list_alerts(
     lk: LiveKitClient = Depends(get_livekit_client),
 ):
     stats = await gather_dashboard_stats(lk)
-    evaluated = alert_service.evaluate_all(stats)
+    evaluated = await alert_service.evaluate_all(stats, project_id=store.request_project_id(request))
     triggered = [rule for rule, is_triggered in evaluated if is_triggered]
-    notifications.fire_webhook(triggered)
+    await notifications.fire_webhook(triggered, project_id=store.request_project_id(request))
 
-    notif_config = notifications.get_config()
+    notif_config = await notifications.get_config(project_id=store.request_project_id(request))
     return request.app.state.templates.TemplateResponse(
         request,
         "alerts/index.html.j2",
@@ -54,12 +55,13 @@ async def create_alert(
 ):
     await verify_csrf_token(request)
     try:
-        alert_service.create_rule(
+        await alert_service.create_rule(
             name=name,
             metric=metric,
             operator=operator,
             threshold=threshold,
             severity=severity,
+            project_id=store.request_project_id(request),
         )
     except ValueError:
         pass
@@ -73,7 +75,7 @@ async def delete_alert(
     csrf_token: str = Form(...),
 ):
     await verify_csrf_token(request)
-    alert_service.delete_rule(rule_id)
+    await alert_service.delete_rule(rule_id, project_id=store.request_project_id(request))
     return RedirectResponse(url="/alerts", status_code=303)
 
 
@@ -84,7 +86,7 @@ async def toggle_alert(
     csrf_token: str = Form(...),
 ):
     await verify_csrf_token(request)
-    alert_service.toggle_rule(rule_id)
+    await alert_service.toggle_rule(rule_id, project_id=store.request_project_id(request))
     return RedirectResponse(url="/alerts", status_code=303)
 
 
@@ -96,7 +98,9 @@ async def configure_notifications(
     cooldown_minutes: int = Form(10),
 ):
     await verify_csrf_token(request)
-    notifications.save_config(webhook_url=webhook_url, cooldown_minutes=cooldown_minutes)
+    await notifications.save_config(
+        webhook_url=webhook_url, cooldown_minutes=cooldown_minutes, project_id=store.request_project_id(request)
+    )
     return RedirectResponse(url="/alerts", status_code=303)
 
 
@@ -109,7 +113,7 @@ async def send_notifications_now(
     """Force-fire webhook for all currently-triggered rules, bypassing cooldown."""
     await verify_csrf_token(request)
     stats = await gather_dashboard_stats(lk)
-    evaluated = alert_service.evaluate_all(stats)
+    evaluated = await alert_service.evaluate_all(stats, project_id=store.request_project_id(request))
     triggered = [rule for rule, is_triggered in evaluated if is_triggered]
-    notifications.fire_webhook(triggered, force=True)
+    await notifications.fire_webhook(triggered, force=True, project_id=store.request_project_id(request))
     return RedirectResponse(url="/alerts", status_code=303)

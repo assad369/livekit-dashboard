@@ -9,7 +9,7 @@ LiveKit Dashboard is a **stateless**, server-side rendered (SSR) web application
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │                         User Browser                            │
-│                    (HTTP Basic Auth)                            │
+│              (Session cookie authentication)                    │
 └───────────────────────────┬─────────────────────────────────────┘
                             │ HTTPS (Production)
                             │ HTTP (Development)
@@ -42,7 +42,7 @@ LiveKit Dashboard is a **stateless**, server-side rendered (SSR) web application
 │                          ▼                                       │
 │  ┌───────────────────────────────────────────────────────────┐ │
 │  │              Security Layer                               │ │
-│  │  • basic_auth.py  - HTTP Basic Auth                       │ │
+│  │  • basic_auth.py  - Session auth helpers for routes       │ │
 │  │  • csrf.py        - CSRF token generation/validation      │ │
 │  └───────────────────────┬───────────────────────────────────┘ │
 │                          ▼                                       │
@@ -90,7 +90,7 @@ LiveKit Dashboard is a **stateless**, server-side rendered (SSR) web application
 
 1. **User Request**
    - User accesses a page (e.g., `/rooms`)
-   - Browser sends HTTP request with Basic Auth header
+   - Browser sends HTTP request with the session cookie
 
 2. **Authentication**
    - Request reaches FastAPI middleware
@@ -190,7 +190,7 @@ For pages with auto-refresh (using HTMX):
 
 ### Security (`app/security/`)
 
-- **basic_auth.py**: HTTP Basic Authentication
+- **basic_auth.py**: Reads the session user that AuthMiddleware recorded
   - Credential verification with constant-time comparison
   - FastAPI dependency for route protection
   
@@ -250,54 +250,101 @@ User Form Submit → Auth Check → CSRF Validation → Route Handler
 User Redirect/Response ← Route Handler ← SDK Response
 ```
 
-## Stateless Design
+## Persistence
 
-### No Persistence
+Live state is still read from LiveKit on every request and never cached into
+staleness. MongoDB is optional and holds only what the LiveKit API cannot
+answer.
 
-- **No Database**: All data fetched from LiveKit on each request
-- **No Redis**: No caching or session storage
-- **No Background Workers**: No async tasks or job queues
+### What lives in MongoDB
 
-### Session State
+| Collection | Contents |
+|---|---|
+| `users` | The admin account and its argon2 password hash |
+| `projects` | Per-project LiveKit URL, API key, and Fernet-encrypted secret |
+| `usage_events` | Raw webhook deliveries, deduplicated by `(project_id, event_id)` |
+| `usage_sessions` | Open/closed intervals pairing a start event with its end |
+| `usage_rollups` | Per-project, per-UTC-day totals — the billing record |
+| `bandwidth_samples` | Prometheus counter readings, for computing deltas |
+| `rates` | Versioned rate cards |
+| `alert_rules`, `saved_views`, `room_annotations`, `audit_log`, `notification_config` | Operator state, previously JSON files under `/tmp` |
 
-- **CSRF Tokens**: Stored in encrypted cookies via SessionMiddleware
-- **Flash Messages**: Transient, stored in session for next request only
-- **Authentication**: HTTP Basic Auth (browser handles credentials)
+### Degradation
 
-### Benefits
+`MONGODB_URI` unset ⇒ the app runs exactly as it did before: the `LIVEKIT_*`
+environment variables form a single implicit project, authentication falls back
+to the environment credentials, and the operator stores write JSON files again.
 
-- **Simple Deployment**: No database setup or migrations
-- **Horizontal Scaling**: Multiple instances without state sync
-- **Always Fresh**: Data always current from LiveKit
-- **Easy Backup**: No data to backup (LiveKit is source of truth)
-- **Fault Tolerant**: Restart without data loss
+Set but unreachable ⇒ the app still boots. `get_db()` returns 503 and the
+affected pages show a banner. Set `MONGODB_REQUIRED=true` to fail fast instead.
+
+### Background workers
+
+Two, both started only when MongoDB is available:
+
+- **Bandwidth collector** (60 s) — samples each project's Prometheus endpoint.
+- **Session sweeper** (15 min) — closes usage sessions whose end event never
+  arrived, capping the duration and flagging it estimated. Without it a crashed
+  LiveKit node would leave sessions open forever and their minutes uncounted.
+
+Both are idempotent.
 
 ### Trade-offs
 
-- **No Historical Data**: Can't show trends or history
-- **No Audit Log**: No record of who did what
-- **SDK Latency**: Every request hits LiveKit API
-- **Limited Caching**: Can't cache frequently accessed data
+- **SDK Latency**: Every page still hits the LiveKit API for live state.
+- **Backups**: MongoDB now holds data worth backing up, and losing
+  `APP_ENCRYPTION_KEY` makes stored project secrets unrecoverable.
+- **Single process**: The login rate limiter, LiveKit client pool, dispatch
+  cache and project-list cache are per-process. The Dockerfile runs one uvicorn
+  process; adding `--workers` would require moving the rate limiter to shared
+  storage.
 
 ## Security Model
 
 ### Authentication
 
-- **HTTP Basic Auth**: Simple, stateless, browser-supported
-- **Single Admin Account**: From environment variables
-- **Constant-Time Comparison**: Prevents timing attacks
+- **Login form + signed session cookie**, `SameSite=Lax`, with an absolute
+  server-side lifetime (`SESSION_MAX_AGE`).
+- **Single admin account**, argon2id hash in MongoDB, bootstrapped from
+  `ADMIN_USERNAME`/`ADMIN_PASSWORD` on first run.
+- **Environment fallback** when MongoDB is unavailable, so a database outage
+  cannot lock the operator out of the tool they would use to diagnose it.
+- **Login throttling**: 10 attempts per 5 minutes per IP+username. The map is
+  bounded in both key count and key length, because the key embeds a
+  client-supplied username. Behind a reverse proxy the peer address is the
+  proxy, which collapses every caller onto one key — set `TRUST_PROXY_HEADERS=true`
+  (only when a proxy actually overwrites `X-Forwarded-For`) to restore
+  per-client throttling. Without it, an attacker can lock the `admin` account
+  out for 5 minutes at a time.
+- **No username-enumeration timing oracle**: a dummy argon2 verification runs
+  on the account-not-found path so both outcomes take comparable time.
+- Failed logins return a generic message — no user enumeration.
+- The session is cleared and re-issued on login (session-fixation defence).
 
 ### Authorization
 
-- **All routes protected** except:
-  - `/health` - Health check (for load balancers)
-  - `/logout` - Logout information page
+Enforced by `AuthMiddleware` as **deny-by-default**: every path requires a
+session unless explicitly allowlisted. Per-route `Depends(requires_admin)`
+declarations remain as a second check. A route added without one is still
+protected, and `tests/test_auth.py` asserts that property across every
+registered route.
+
+Public paths: `/health`, `/health/deep`, `/login`, `/logout`, `/static/*`, and
+`/webhooks/*` (which authenticates with LiveKit's own signed JWT).
+`/health/deep` reports *whether* the app is degraded to anyone, but withholds
+error strings and collection names unless the caller has a session — PyMongo
+errors embed the internal topology.
+
+Signed sessions are stateless, so logging out replaces the cookie in that
+browser but cannot revoke a copy captured beforehand; such a copy remains valid
+until `auth_at + SESSION_MAX_AGE`.
 
 ### CSRF Protection
 
-- **Token Generation**: Per-request, time-limited
-- **Form Integration**: Automatic via Jinja2 template function
-- **Validation**: On all POST/PUT/DELETE requests
+Tokens are signed **and bound to the session**. Signature alone was not enough:
+an attacker could fetch any public page, receive a validly-signed token, and
+embed it in a form on their own site. The session binding makes tokens
+non-transferable between browsers.
 
 ### Security Headers
 
@@ -349,7 +396,7 @@ nginx/Caddy (TLS) → FastAPI Container → LiveKit Server
 
 ### Scalability
 
-- **Stateless**: Horizontal scaling easy
+- **Shared state in MongoDB**: horizontal scaling needs the caveats noted under Persistence
 - **LiveKit as Bottleneck**: SDK rate limits may apply
 - **Mitigation**: Use reverse proxy caching for static assets
 

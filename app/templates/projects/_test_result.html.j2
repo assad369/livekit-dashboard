@@ -1,0 +1,9 @@
+{% if result.ok %}
+<span class="badge bg-success" title="{{ result.rooms }} room(s) visible">
+  <i class="bi bi-check-circle me-1"></i>{{ result.latency_ms }} ms
+</span>
+{% else %}
+<span class="badge bg-danger" title="{{ result.error }}">
+  <i class="bi bi-x-circle me-1"></i>Failed
+</span>
+{% endif %}

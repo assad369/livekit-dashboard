@@ -3,6 +3,7 @@ LiveKit Dashboard - Main Application
 Stateless SSR dashboard for LiveKit server management
 """
 
+import asyncio
 import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -15,12 +16,18 @@ from fastapi import FastAPI, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response
+from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 
-from app.routes import overview, rooms, egress, ingress, sip, settings, sandbox, auth, agents, homer, search, views, alerts, audit, diagnostics, events
+from app.routes import overview, rooms, egress, ingress, sip, settings, sandbox, auth, agents, homer, search, views, alerts, audit, diagnostics, events, projects, webhooks, billing
 from app.security.csrf import get_csrf_token
+from app.middleware.project_context import ProjectContextMiddleware
+from app.security.session_auth import AuthMiddleware
 from app.utils.formatters import format_duration, format_pct, status_color, format_number
+from app.db import mongo
+from app.services import lk_pool, prom_collector, usage
+from app.services.users import bootstrap_admin, using_default_password
 
 
 @asynccontextmanager
@@ -41,10 +48,67 @@ async def lifespan(app: FastAPI):
     else:
         print("✅ All required environment variables are set")
 
+    await mongo.connect()
+    db_health = mongo.health()
+    if not db_health["enabled"]:
+        print("   MongoDB: not configured (running without persistence)")
+    elif db_health["connected"]:
+        print(f"   MongoDB: connected (db={db_health['db']})")
+        if db_health["index_errors"]:
+            print(f"⚠️  WARNING: {len(db_health['index_errors'])} index(es) failed to create")
+        try:
+            created = await bootstrap_admin(mongo.get_database())
+            if created:
+                print(f"   Created admin account '{created.username}' from environment")
+        except Exception as exc:
+            print(f"⚠️  WARNING: could not bootstrap the admin account: {exc}")
+    else:
+        print(f"⚠️  WARNING: MongoDB unreachable: {db_health['error']}")
+
+    if using_default_password():
+        print("⚠️  WARNING: ADMIN_PASSWORD is still the default 'changeme' — change it")
+
+    # Background workers only make sense with somewhere to write.
+    background: list[asyncio.Task] = []
+    if mongo.get_database() is not None and not _in_test_mode():
+        background.append(asyncio.create_task(prom_collector.collector_loop()))
+        background.append(asyncio.create_task(_sweep_loop()))
+
     yield
 
     # Shutdown
     print("👋 LiveKit Dashboard shutting down...")
+    for task in background:
+        task.cancel()
+    for task in background:
+        try:
+            await task
+        except (asyncio.CancelledError, Exception):
+            pass
+    await lk_pool.close_all()
+    await mongo.disconnect()
+
+
+def _in_test_mode() -> bool:
+    return os.environ.get("PYTEST_CURRENT_TEST") is not None
+
+
+async def _sweep_loop() -> None:
+    """Periodically close usage sessions whose end event never arrived.
+
+    Without this a crashed LiveKit node leaves sessions open forever and their
+    minutes are never counted, so the month silently under-reports.
+    """
+    interval = int(os.environ.get("USAGE_SWEEP_INTERVAL", "900"))
+    max_age = int(os.environ.get("USAGE_SESSION_MAX_HOURS", "24"))
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            await usage.sweep_stale_sessions(mongo.get_database(), max_age_hours=max_age)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            print(f"⚠️  usage sweep failed: {exc}")
 
 
 # Create FastAPI app
@@ -57,32 +121,99 @@ app = FastAPI(
     redoc_url=None,  # Disable ReDoc in production
 )
 
-# Add security middleware
+# ---------------------------------------------------------------------------
+# Middleware
+#
+# IMPORTANT: `add_middleware` inserts at the front of the stack, so the LAST
+# one registered is the OUTERMOST. They are therefore registered
+# innermost-first below, giving this execution order:
+#
+#   SecurityHeaders -> CORS -> Session -> Auth -> ProjectContext -> ReadOnly
+#     -> CSRF -> router
+#
+# The CSRF middleware must sit INSIDE SessionMiddleware because it stores the
+# per-browser CSRF secret in the session. Do not reorder these without
+# updating tests/test_middleware_order.py, which pins the arrangement.
+# ---------------------------------------------------------------------------
+
+# Paths that stay writable in readonly mode: authentication, and inbound
+# webhooks (which are machine-to-machine and authenticate themselves).
+READONLY_EXEMPT_EXACT = {"/login", "/logout", "/projects/switch"}
+READONLY_EXEMPT_PREFIXES = ("/webhooks/",)
+
+
+def _readonly_exempt(path: str) -> bool:
+    return path in READONLY_EXEMPT_EXACT or path.startswith(READONLY_EXEMPT_PREFIXES)
+
+
+class CSRFTokenMiddleware(BaseHTTPMiddleware):
+    """Ensure every request has a CSRF token available for templates."""
+
+    async def dispatch(self, request: Request, call_next):
+        get_csrf_token(request)
+        return await call_next(request)
+
+
+class ReadOnlyModeMiddleware(BaseHTTPMiddleware):
+    """Block mutating requests when DASHBOARD_ROLE=readonly."""
+
+    async def dispatch(self, request: Request, call_next):
+        if os.environ.get("DASHBOARD_ROLE", "admin").lower() == "readonly":
+            if request.method in ("POST", "PUT", "PATCH", "DELETE"):
+                if not _readonly_exempt(request.url.path):
+                    return Response(
+                        "Read-only mode — mutations are disabled.", status_code=403
+                    )
+        return await call_next(request)
+
+
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    """Add security headers to all responses"""
+
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["X-XSS-Protection"] = "1; mode=block"
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+
+        # Only add HSTS in production with HTTPS
+        if os.environ.get("DEBUG", "false").lower() != "true":
+            response.headers["Strict-Transport-Security"] = (
+                "max-age=31536000; includeSubDomains"
+            )
+
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'self'; "
+            "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://unpkg.com; "
+            "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
+            "font-src 'self' https://cdn.jsdelivr.net; "
+            "img-src 'self' data: https:; "
+            "connect-src 'self';"
+        )
+
+        # Disable caching for HTML pages
+        if response.headers.get("content-type", "").startswith("text/html"):
+            response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+            response.headers["Pragma"] = "no-cache"
+            response.headers["Expires"] = "0"
+
+        return response
+
+
+# Registered innermost-first — see the note above.
+app.add_middleware(CSRFTokenMiddleware)
+app.add_middleware(ReadOnlyModeMiddleware)
+app.add_middleware(ProjectContextMiddleware)
+app.add_middleware(AuthMiddleware)
 app.add_middleware(
     SessionMiddleware,
     secret_key=os.environ.get("APP_SECRET_KEY", "dev-secret-key-change-in-production"),
+    session_cookie="lkdash_session",
+    same_site="lax",
+    https_only=os.environ.get("SESSION_HTTPS_ONLY", "false").lower() == "true",
 )
-
-
-@app.middleware("http")
-async def ensure_csrf_token(request: Request, call_next):
-    """Ensure every request has a CSRF token available for templates."""
-    get_csrf_token(request)
-    return await call_next(request)
-
-
-@app.middleware("http")
-async def enforce_readonly_mode(request: Request, call_next):
-    """Block mutating requests when DASHBOARD_ROLE=readonly."""
-    if os.environ.get("DASHBOARD_ROLE", "admin").lower() == "readonly":
-        if request.method in ("POST", "PUT", "PATCH", "DELETE"):
-            if not request.url.path.startswith("/auth"):
-                from fastapi.responses import Response as _Resp
-                return _Resp("Read-only mode — mutations are disabled.", status_code=403)
-    return await call_next(request)
-
-
-# Add CORS middleware (restrictive by default)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[],  # No CORS by default for security
@@ -90,6 +221,7 @@ app.add_middleware(
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
+app.add_middleware(SecurityHeadersMiddleware)
 
 # Setup Jinja2 templates
 templates = Jinja2Templates(directory="app/templates")
@@ -155,42 +287,9 @@ app.include_router(alerts.router, tags=["Alerts"])
 app.include_router(audit.router, tags=["Audit"])
 app.include_router(diagnostics.router, tags=["Diagnostics"])
 app.include_router(events.router, tags=["Events"])
-
-
-# Security headers middleware
-@app.middleware("http")
-async def add_security_headers(request: Request, call_next):
-    """Add security headers to all responses"""
-    response = await call_next(request)
-
-    # Security headers
-    response.headers["X-Content-Type-Options"] = "nosniff"
-    response.headers["X-Frame-Options"] = "DENY"
-    response.headers["X-XSS-Protection"] = "1; mode=block"
-    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
-
-    # Only add HSTS in production with HTTPS
-    if os.environ.get("DEBUG", "false").lower() != "true":
-        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
-
-    # Content Security Policy (adjust as needed)
-    csp = (
-        "default-src 'self'; "
-        "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://unpkg.com; "
-        "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
-        "font-src 'self' https://cdn.jsdelivr.net; "
-        "img-src 'self' data: https:; "
-        "connect-src 'self';"
-    )
-    response.headers["Content-Security-Policy"] = csp
-
-    # Disable caching for HTML pages
-    if response.headers.get("content-type", "").startswith("text/html"):
-        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
-        response.headers["Pragma"] = "no-cache"
-        response.headers["Expires"] = "0"
-
-    return response
+app.include_router(projects.router, tags=["Projects"])
+app.include_router(webhooks.router)
+app.include_router(billing.router, tags=["Billing"])
 
 
 # Error handlers
@@ -225,6 +324,34 @@ async def server_error_handler(request: Request, exc):
 async def health_check():
     """Health check endpoint"""
     return HTMLResponse(content="OK", status_code=200)
+
+
+@app.get("/health/deep")
+async def health_deep(request: Request):
+    """Dependency health, including index failures that would break billing.
+
+    Reachable unauthenticated so a probe can see *whether* the app is degraded,
+    but the details are withheld: PyMongo's connection errors embed the full
+    topology (internal hostnames, ports, replica-set names) and index errors
+    enumerate collection names. Sign in to see them.
+    """
+    db = mongo.health()
+    degraded = bool(db["index_errors"]) or (db["enabled"] and not db["connected"])
+    status_code = 503 if degraded else 200
+
+    if request.scope.get("state", {}).get("user"):
+        body = {"status": "degraded" if degraded else "ok", "mongodb": db}
+    else:
+        body = {
+            "status": "degraded" if degraded else "ok",
+            "mongodb": {
+                "enabled": db["enabled"],
+                "connected": db["connected"],
+                "index_errors": len(db["index_errors"]),
+            },
+        }
+
+    return JSONResponse(body, status_code=status_code)
 
 
 if __name__ == "__main__":

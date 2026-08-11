@@ -4,19 +4,24 @@ Sends a single POST to a configured URL with a JSON payload listing all
 currently-triggered rules. Uses a cooldown so repeated page loads don't
 spam the endpoint.
 
-Config is stored in a JSON file (path via NOTIFICATIONS_FILE env var).
+Config lives in MongoDB when configured, otherwise a JSON file, and is
+scoped per project.
 Schema: {"webhook_url": "...", "cooldown_minutes": 10, "last_fired": "ISO"}
 """
 
 import json
 import os
-import urllib.request
-import urllib.error
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
+import httpx
+
+from app.services import store
+
 
 _STORE_PATH = os.environ.get("NOTIFICATIONS_FILE", "/tmp/notifications_config.json")
+
+COLLECTION = "notification_config"
 
 
 def _now() -> datetime:
@@ -24,20 +29,35 @@ def _now() -> datetime:
 
 
 def _load() -> dict:
-    try:
-        with open(_STORE_PATH) as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {}
+    return store.read_json(_STORE_PATH, {})
 
 
 def _save(cfg: dict) -> None:
-    with open(_STORE_PATH, "w") as f:
-        json.dump(cfg, f, indent=2)
+    store.write_json(_STORE_PATH, cfg)
 
 
-def get_config() -> dict:
-    cfg = _load()
+async def _read(project_id: Optional[str]) -> dict:
+    collection = store.collection(COLLECTION)
+    if collection is None:
+        return _load()
+    doc = await collection.find_one({"_id": store.scope(project_id)})
+    return doc or {}
+
+
+async def _write(project_id: Optional[str], updates: dict) -> None:
+    collection = store.collection(COLLECTION)
+    if collection is None:
+        cfg = _load()
+        cfg.update(updates)
+        _save(cfg)
+        return
+    await collection.update_one(
+        {"_id": store.scope(project_id)}, {"$set": updates}, upsert=True
+    )
+
+
+async def get_config(project_id: Optional[str] = None) -> dict:
+    cfg = await _read(project_id)
     return {
         "webhook_url": cfg.get("webhook_url", ""),
         "cooldown_minutes": int(cfg.get("cooldown_minutes", 10)),
@@ -45,11 +65,13 @@ def get_config() -> dict:
     }
 
 
-def save_config(webhook_url: str, cooldown_minutes: int = 10) -> None:
-    cfg = _load()
-    cfg["webhook_url"] = webhook_url.strip()
-    cfg["cooldown_minutes"] = max(1, int(cooldown_minutes))
-    _save(cfg)
+async def save_config(
+    webhook_url: str, cooldown_minutes: int = 10, project_id: Optional[str] = None
+) -> None:
+    await _write(project_id, {
+        "webhook_url": webhook_url.strip(),
+        "cooldown_minutes": max(1, int(cooldown_minutes)),
+    })
 
 
 def _cooldown_elapsed(cfg: dict) -> bool:
@@ -65,16 +87,21 @@ def _cooldown_elapsed(cfg: dict) -> bool:
         return True
 
 
-def fire_webhook(triggered_rules: list, force: bool = False) -> Optional[dict]:
+async def fire_webhook(
+    triggered_rules: list, force: bool = False, project_id: Optional[str] = None
+) -> Optional[dict]:
     """POST a notification if rules are triggered and cooldown has elapsed.
 
     Returns a result dict {"status": int|None, "error": str|None} or None
     when skipped (no URL, no triggered rules, or cooldown active).
+
+    Async because this runs inside request handlers; a blocking urlopen here
+    stalled the whole event loop for up to 5s on every /alerts page load.
     """
     if not triggered_rules:
         return None
 
-    cfg = _load()
+    cfg = await _read(project_id)
     url = cfg.get("webhook_url", "").strip()
     if not url:
         return None
@@ -82,7 +109,7 @@ def fire_webhook(triggered_rules: list, force: bool = False) -> Optional[dict]:
     if not force and not _cooldown_elapsed(cfg):
         return None
 
-    payload = json.dumps({
+    payload = {
         "source": "livekit-dashboard",
         "fired_at": _now().isoformat(timespec="seconds"),
         "triggered_rules": [
@@ -96,23 +123,24 @@ def fire_webhook(triggered_rules: list, force: bool = False) -> Optional[dict]:
             }
             for r in triggered_rules
         ],
-    }).encode()
+    }
 
     result: dict = {}
     try:
-        req = urllib.request.Request(
-            url,
-            data=payload,
-            headers={"Content-Type": "application/json", "User-Agent": "livekit-dashboard/1.0"},
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            result = {"status": resp.status, "error": None}
-    except urllib.error.HTTPError as e:
-        result = {"status": e.code, "error": e.reason}
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.post(
+                url,
+                content=json.dumps(payload).encode(),
+                headers={
+                    "Content-Type": "application/json",
+                    "User-Agent": "livekit-dashboard/1.0",
+                },
+            )
+        result = {"status": resp.status_code, "error": None}
+    except httpx.HTTPError as exc:
+        result = {"status": None, "error": str(exc)}
     except Exception as exc:
         result = {"status": None, "error": str(exc)}
 
-    cfg["last_fired"] = _now().isoformat(timespec="seconds")
-    _save(cfg)
+    await _write(project_id, {"last_fired": _now().isoformat(timespec="seconds")})
     return result

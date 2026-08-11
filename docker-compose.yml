@@ -20,12 +20,33 @@ services:
 
       # Application Settings
       APP_SECRET_KEY: ${APP_SECRET_KEY:-dev-secret-key-change-in-production}
+      # Encrypts project API secrets at rest. BACK THIS UP — losing it makes
+      # stored project secrets unrecoverable. Generate: openssl rand -base64 32
+      APP_ENCRYPTION_KEY: ${APP_ENCRYPTION_KEY:-}
+      APP_ENCRYPTION_KEY_OLD: ${APP_ENCRYPTION_KEY_OLD:-}
+      SESSION_MAX_AGE: ${SESSION_MAX_AGE:-86400}
+      SESSION_HTTPS_ONLY: ${SESSION_HTTPS_ONLY:-true}
       DEBUG: ${DEBUG:-false}
       HOST: ${HOST:-0.0.0.0}
       PORT: ${PORT:-8000}
 
+      # MongoDB — leave MONGODB_URI empty to run without persistence.
+      MONGODB_URI: ${MONGODB_URI:-}
+      MONGODB_DB: ${MONGODB_DB:-livekit_dashboard}
+      # Fail startup instead of degrading when Mongo is unreachable.
+      MONGODB_REQUIRED: ${MONGODB_REQUIRED:-false}
+      USAGE_EVENTS_TTL_DAYS: ${USAGE_EVENTS_TTL_DAYS:-90}
+      AUDIT_TTL_DAYS: ${AUDIT_TTL_DAYS:-365}
+
       # Feature Flags
       ENABLE_SIP: ${ENABLE_SIP:-true}
+      ENABLE_HOMER: ${ENABLE_HOMER:-false}
+      HOMER_URL: ${HOMER_URL:-}
+      HOMER_USERNAME: ${HOMER_USERNAME:-}
+      HOMER_PASSWORD: ${HOMER_PASSWORD:-}
+
+      # Set to "readonly" to block all mutating requests.
+      DASHBOARD_ROLE: ${DASHBOARD_ROLE:-admin}
 
     restart: unless-stopped
 

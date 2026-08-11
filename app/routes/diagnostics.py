@@ -8,6 +8,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.encoders import jsonable_encoder
 from typing import Optional
 
+from app.services import store
 from app.services.livekit import LiveKitClient, get_livekit_client
 from app.services import room_annotations as annotations
 from app.security.basic_auth import requires_admin, get_current_user
@@ -66,7 +67,7 @@ async def room_support_bundle(
     except Exception:
         pass
 
-    room_ann = annotations.get_annotations(room_name)
+    room_ann = await annotations.get_annotations(room_name, project_id=store.request_project_id(request))
     timeline = annotations.build_timeline(room, raw_participants if participants else [])
 
     bundle = {

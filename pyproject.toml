@@ -19,10 +19,18 @@ python-dotenv = "^1.0.0"
 colorama = "^0.4.6"
 pydub = "^0.25.1"
 httpx = "^0.27.0"
+# PyMongo's native async client (AsyncMongoClient) — Motor is EOL.
+pymongo = {version = "^4.15", extras = ["srv"]}
+# Fernet, for project API secrets at rest.
+cryptography = "^45.0"
+# argon2id password hashing for the admin account.
+argon2-cffi = "^25.1"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^7.4.0"
 pytest-asyncio = "^0.21.0"
+# `make test-cov` has always invoked --cov without declaring the plugin.
+pytest-cov = "^5.0.0"
 black = "^24.0.0"
 ruff = "^0.1.0"
 mypy = "^1.8.0"

@@ -137,8 +137,18 @@
             <i class="bi bi-info-circle text-muted"></i>
         </div>
         <div class="metric-value">
+            {% if analytics.connection_minutes_source == 'webhooks' %}
             <span class="metric-number">{{ analytics.connection_minutes }}</span>
-            <span class="metric-unit">min</span>
+            <span class="metric-unit">min today</span>
+            {% else %}
+            {# A 0 here would read as "nobody connected" rather than
+               "we are not receiving usage data". #}
+            <span class="metric-number text-muted"
+                  title="No webhook data — configure LiveKit webhooks on the Billing page">—</span>
+            <span class="metric-unit">
+                <a href="/billing" class="text-muted">set up</a>
+            </span>
+            {% endif %}
         </div>
     </div>
 </div>

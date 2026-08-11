@@ -7,6 +7,8 @@ import pytest
 from fastapi import status
 from fastapi.testclient import TestClient
 
+from tests.conftest import log_in
+
 
 def _auth_headers():
     import base64
@@ -14,9 +16,9 @@ def _auth_headers():
     return {"Authorization": f"Basic {base64.b64encode(creds.encode()).decode()}"}
 
 
-def _csrf_token():
-    from app.security.csrf import generate_csrf_token
-    return generate_csrf_token()
+def _csrf_token(c):
+    from tests.conftest import csrf_for
+    return csrf_for(c)
 
 
 def _make_mock_lk():
@@ -43,29 +45,30 @@ def rooms_client():
     app.dependency_overrides[get_livekit_client] = lambda: mock_lk
 
     with TestClient(app, raise_server_exceptions=False) as c:
+        log_in(c)
         yield c, mock_lk
 
     app.dependency_overrides.pop(get_livekit_client, None)
 
 
 class TestRoomAuthGuards:
-    def test_room_update_requires_auth(self, client):
-        r = client.post("/rooms/test-room/update", data={"csrf_token": "x", "metadata": ""})
+    def test_room_update_requires_auth(self, unauth_client):
+        r = unauth_client.post("/rooms/test-room/update", data={"csrf_token": "x", "metadata": ""})
         assert r.status_code == status.HTTP_401_UNAUTHORIZED
 
-    def test_participant_update_requires_auth(self, client):
-        r = client.post("/rooms/r/participants/p/update", data={"csrf_token": "x"})
+    def test_participant_update_requires_auth(self, unauth_client):
+        r = unauth_client.post("/rooms/r/participants/p/update", data={"csrf_token": "x"})
         assert r.status_code == status.HTTP_401_UNAUTHORIZED
 
-    def test_participant_mute_requires_auth(self, client):
-        r = client.post("/rooms/r/participants/p/mute", data={"csrf_token": "x", "track_sid": "t", "muted": "true"})
+    def test_participant_mute_requires_auth(self, unauth_client):
+        r = unauth_client.post("/rooms/r/participants/p/mute", data={"csrf_token": "x", "track_sid": "t", "muted": "true"})
         assert r.status_code == status.HTTP_401_UNAUTHORIZED
 
 
 class TestRoomUpdate:
     def test_update_room_metadata(self, rooms_client):
         c, mock_lk = rooms_client
-        token = _csrf_token()
+        token = _csrf_token(c)
         r = c.post(
             "/rooms/test-room/update",
             headers=_auth_headers(),
@@ -79,7 +82,7 @@ class TestRoomUpdate:
 class TestParticipantManagement:
     def test_mute_participant(self, rooms_client):
         c, mock_lk = rooms_client
-        token = _csrf_token()
+        token = _csrf_token(c)
         r = c.post(
             "/rooms/my-room/participants/alice/mute",
             headers=_auth_headers(),
@@ -91,7 +94,7 @@ class TestParticipantManagement:
 
     def test_unmute_participant(self, rooms_client):
         c, mock_lk = rooms_client
-        token = _csrf_token()
+        token = _csrf_token(c)
         r = c.post(
             "/rooms/my-room/participants/alice/mute",
             headers=_auth_headers(),
@@ -103,7 +106,7 @@ class TestParticipantManagement:
 
     def test_update_participant_metadata(self, rooms_client):
         c, mock_lk = rooms_client
-        token = _csrf_token()
+        token = _csrf_token(c)
         r = c.post(
             "/rooms/my-room/participants/alice/update",
             headers=_auth_headers(),
@@ -142,8 +145,8 @@ class TestRoomsExportCsv:
         r.metadata = metadata
         return r
 
-    def test_export_requires_auth(self, client):
-        r = client.get("/rooms/export.csv")
+    def test_export_requires_auth(self, unauth_client):
+        r = unauth_client.get("/rooms/export.csv")
         assert r.status_code == status.HTTP_401_UNAUTHORIZED
 
     def test_export_returns_csv(self, rooms_client):
@@ -192,21 +195,21 @@ class TestRoomsPartialRefresh:
 
 
 class TestPinRoom:
-    def test_pin_requires_auth(self, client):
-        r = client.post("/rooms/test-room/pin", data={"csrf_token": "x"})
+    def test_pin_requires_auth(self, unauth_client):
+        r = unauth_client.post("/rooms/test-room/pin", data={"csrf_token": "x"})
         assert r.status_code == status.HTTP_401_UNAUTHORIZED
 
-    def test_unpin_requires_auth(self, client):
-        r = client.post("/rooms/test-room/unpin", data={"csrf_token": "x"})
+    def test_unpin_requires_auth(self, unauth_client):
+        r = unauth_client.post("/rooms/test-room/unpin", data={"csrf_token": "x"})
         assert r.status_code == status.HTTP_401_UNAUTHORIZED
 
-    def test_pin_room_redirects(self, rooms_client, tmp_path, monkeypatch):
+    async def test_pin_room_redirects(self, rooms_client, tmp_path, monkeypatch):
         import app.services.room_annotations as ann
         store = tmp_path / "annotations.json"
         monkeypatch.setattr(ann, "_STORE_PATH", str(store))
 
         c, _ = rooms_client
-        token = _csrf_token()
+        token = _csrf_token(c)
         r = c.post(
             "/rooms/my-room/pin",
             headers=_auth_headers(),
@@ -214,16 +217,16 @@ class TestPinRoom:
             follow_redirects=False,
         )
         assert r.status_code == status.HTTP_303_SEE_OTHER
-        assert "my-room" in ann.get_pinned()
+        assert "my-room" in await ann.get_pinned()
 
-    def test_unpin_room_redirects(self, rooms_client, tmp_path, monkeypatch):
+    async def test_unpin_room_redirects(self, rooms_client, tmp_path, monkeypatch):
         import app.services.room_annotations as ann
         store = tmp_path / "annotations.json"
         monkeypatch.setattr(ann, "_STORE_PATH", str(store))
-        ann.pin_room("my-room")  # pre-pin
+        await ann.pin_room("my-room")  # pre-pin
 
         c, _ = rooms_client
-        token = _csrf_token()
+        token = _csrf_token(c)
         r = c.post(
             "/rooms/my-room/unpin",
             headers=_auth_headers(),
@@ -231,23 +234,23 @@ class TestPinRoom:
             follow_redirects=False,
         )
         assert r.status_code == status.HTTP_303_SEE_OTHER
-        assert "my-room" not in ann.get_pinned()
+        assert "my-room" not in await ann.get_pinned()
 
-    def test_pin_idempotent(self, tmp_path, monkeypatch):
+    async def test_pin_idempotent(self, tmp_path, monkeypatch):
         import app.services.room_annotations as ann
         store = tmp_path / "annotations.json"
         monkeypatch.setattr(ann, "_STORE_PATH", str(store))
-        ann.pin_room("room-a")
-        ann.pin_room("room-a")
-        assert ann.get_pinned().count("room-a") == 1
+        await ann.pin_room("room-a")
+        await ann.pin_room("room-a")
+        assert (await ann.get_pinned()).count("room-a") == 1
 
 
 class TestAnnotateRoom:
-    def test_annotate_requires_auth(self, client):
-        r = client.post("/rooms/test-room/annotate", data={"csrf_token": "x"})
+    def test_annotate_requires_auth(self, unauth_client):
+        r = unauth_client.post("/rooms/test-room/annotate", data={"csrf_token": "x"})
         assert r.status_code == status.HTTP_401_UNAUTHORIZED
 
-    def test_annotate_saves_note_and_tags(self, rooms_client, tmp_path, monkeypatch):
+    async def test_annotate_saves_note_and_tags(self, rooms_client, tmp_path, monkeypatch):
         import app.services.room_annotations as ann
         store = tmp_path / "annotations.json"
         monkeypatch.setattr(ann, "_STORE_PATH", str(store))
@@ -263,7 +266,7 @@ class TestAnnotateRoom:
         mock_lk.list_rooms = AsyncMock(return_value=([mock_room], 0.0))
         mock_lk.list_participants = AsyncMock(return_value=[])
 
-        token = _csrf_token()
+        token = _csrf_token(c)
         r = c.post(
             "/rooms/prod-room/annotate",
             headers=_auth_headers(),
@@ -271,12 +274,12 @@ class TestAnnotateRoom:
             follow_redirects=False,
         )
         assert r.status_code == status.HTTP_303_SEE_OTHER
-        saved = ann.get_annotations("prod-room")
+        saved = await ann.get_annotations("prod-room")
         assert saved["note"] == "Production room"
         assert "prod" in saved["tags"]
         assert "VIP" in saved["tags"]
 
-    def test_annotate_bad_csrf(self, rooms_client, tmp_path, monkeypatch):
+    async def test_annotate_bad_csrf(self, rooms_client, tmp_path, monkeypatch):
         import app.services.room_annotations as ann
         store = tmp_path / "annotations.json"
         monkeypatch.setattr(ann, "_STORE_PATH", str(store))
@@ -293,26 +296,26 @@ class TestAnnotateRoom:
             status.HTTP_400_BAD_REQUEST,
             status.HTTP_403_FORBIDDEN,
         )
-        saved = ann.get_annotations("prod-room")
+        saved = await ann.get_annotations("prod-room")
         assert saved["note"] == ""
 
 
 class TestRoomAnnotationsService:
-    def test_pin_unpin_get_pinned(self, tmp_path, monkeypatch):
+    async def test_pin_unpin_get_pinned(self, tmp_path, monkeypatch):
         import app.services.room_annotations as ann
         monkeypatch.setattr(ann, "_STORE_PATH", str(tmp_path / "ann.json"))
-        assert ann.get_pinned() == []
-        ann.pin_room("r1")
-        ann.pin_room("r2")
-        assert set(ann.get_pinned()) == {"r1", "r2"}
-        ann.unpin_room("r1")
-        assert ann.get_pinned() == ["r2"]
+        assert await ann.get_pinned() == []
+        await ann.pin_room("r1")
+        await ann.pin_room("r2")
+        assert set(await ann.get_pinned()) == {"r1", "r2"}
+        await ann.unpin_room("r1")
+        assert await ann.get_pinned() == ["r2"]
 
-    def test_set_get_annotations(self, tmp_path, monkeypatch):
+    async def test_set_get_annotations(self, tmp_path, monkeypatch):
         import app.services.room_annotations as ann
         monkeypatch.setattr(ann, "_STORE_PATH", str(tmp_path / "ann.json"))
-        ann.set_annotations("r1", "my note", ["prod", "demo"])
-        result = ann.get_annotations("r1")
+        await ann.set_annotations("r1", "my note", ["prod", "demo"])
+        result = await ann.get_annotations("r1")
         assert result["note"] == "my note"
         assert result["tags"] == ["prod", "demo"]
         assert result["pinned"] is False

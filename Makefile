@@ -87,9 +87,19 @@ env-example: ## Create .env file from .env.example
 		echo "" >> .env; \
 		echo "# Application Settings" >> .env; \
 		echo "APP_SECRET_KEY=$$(openssl rand -hex 32)" >> .env; \
+		echo "# Encrypts project API secrets at rest. BACK THIS UP — losing it" >> .env; \
+		echo "# makes every stored project secret unrecoverable." >> .env; \
+		echo "APP_ENCRYPTION_KEY=$$(openssl rand -base64 32)" >> .env; \
 		echo "DEBUG=false" >> .env; \
 		echo "HOST=0.0.0.0" >> .env; \
 		echo "PORT=8000" >> .env; \
+		echo "# Set to false when serving over plain HTTP locally." >> .env; \
+		echo "SESSION_HTTPS_ONLY=true" >> .env; \
+		echo "" >> .env; \
+		echo "# MongoDB (optional). Leave blank to run single-project with no" >> .env; \
+		echo "# usage history or billing." >> .env; \
+		echo "MONGODB_URI=" >> .env; \
+		echo "MONGODB_DB=livekit_dashboard" >> .env; \
 		echo "" >> .env; \
 		echo "# Feature Flags" >> .env; \
 		echo "ENABLE_SIP=false" >> .env; \

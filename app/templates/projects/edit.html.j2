@@ -1,0 +1,82 @@
+{% extends "base.html.j2" %}
+
+{% block title %}Edit {{ project.name }} — LiveKit Dashboard{% endblock %}
+{% block page_title %}Edit project{% endblock %}
+{% block page_subtitle %}
+<p class="text-muted mb-0">{{ project.slug }}</p>
+{% endblock %}
+
+{% block content %}
+<div class="container-fluid px-4 py-4">
+  <div class="row">
+    <div class="col-lg-8">
+      <div class="card">
+        <div class="card-body">
+          <form method="post" action="/projects/{{ project.id }}" class="row g-3">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+
+            <div class="col-md-6">
+              <label class="form-label small">Name</label>
+              <input type="text" name="name" class="form-control form-control-sm"
+                     value="{{ project.name }}" required>
+            </div>
+            <div class="col-md-6">
+              <label class="form-label small">LiveKit URL</label>
+              <input type="text" name="livekit_url" class="form-control form-control-sm"
+                     value="{{ project.livekit_url }}" required>
+            </div>
+
+            <div class="col-md-6">
+              <label class="form-label small">API key</label>
+              <input type="text" name="api_key" class="form-control form-control-sm"
+                     value="{{ project.api_key }}" autocomplete="off" required>
+            </div>
+            <div class="col-md-6">
+              <label class="form-label small">API secret</label>
+              <input type="password" name="api_secret" class="form-control form-control-sm"
+                     placeholder="Leave blank to keep {{ project.masked_secret() }}"
+                     autocomplete="new-password">
+              <div class="form-text">Only fill this in to replace the stored secret.</div>
+            </div>
+
+            <div class="col-md-8">
+              <label class="form-label small">Prometheus metrics URL</label>
+              <input type="text" name="prometheus_url" class="form-control form-control-sm"
+                     value="{{ project.prometheus_url }}"
+                     placeholder="http://livekit.example.com:6789/metrics">
+            </div>
+            <div class="col-md-4 d-flex align-items-end">
+              <div class="form-check">
+                <input class="form-check-input" type="checkbox" name="sip_enabled"
+                       id="sip_enabled" {% if project.sip_enabled %}checked{% endif %}>
+                <label class="form-check-label" for="sip_enabled">SIP enabled</label>
+              </div>
+            </div>
+
+            <div class="col-12 d-flex gap-2">
+              <button type="submit" class="btn btn-primary btn-sm"
+                      {% if is_readonly() %}disabled{% endif %}>Save changes</button>
+              <a href="/projects" class="btn btn-secondary btn-sm">Cancel</a>
+            </div>
+          </form>
+        </div>
+      </div>
+    </div>
+
+    <div class="col-lg-4">
+      <div class="card">
+        <div class="card-header"><h6 class="mb-0">Server configuration</h6></div>
+        <div class="card-body">
+          <p class="text-muted small mb-2">Add to this server's <code>config.yaml</code>:</p>
+<pre class="bg-body-tertiary p-2 rounded small mb-0"><code>webhook:
+  api_key: {{ project.api_key }}
+  urls:
+    - {{ webhook_url }}
+
+prometheus_port: 6789</code></pre>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}

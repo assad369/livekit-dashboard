@@ -1,0 +1,367 @@
+{% extends "base.html.j2" %}
+
+{% block title %}Billing — LiveKit Dashboard{% endblock %}
+{% block page_title %}Billing{% endblock %}
+{% block page_subtitle %}
+<p class="text-muted mb-0">What this traffic would have cost on LiveKit Cloud</p>
+{% endblock %}
+
+{% block content %}
+<div class="container-fluid px-4 py-4">
+
+  {% if not storage_available %}
+  <div class="alert alert-warning">
+    <i class="bi bi-database-exclamation me-1"></i>
+    <strong>Storage unavailable.</strong>
+    {{ db_health.error or "Set MONGODB_URI to record usage history." }}
+  </div>
+  {% endif %}
+
+  {% if estimate.needs_verification %}
+  <div class="alert alert-warning d-flex justify-content-between align-items-center">
+    <div>
+      <i class="bi bi-exclamation-triangle me-1"></i>
+      <strong>Rates not confirmed.</strong>
+      These figures use LiveKit's published entry-tier pricing as a starting point.
+      Pricing is volume-tiered and changes, so confirm the numbers against
+      <a href="{{ card.source_url }}" target="_blank" rel="noopener">livekit.io/pricing</a>
+      before trusting the total.
+    </div>
+    <a href="/billing/rates" class="btn btn-sm btn-primary text-nowrap ms-3">Set rates</a>
+  </div>
+  {% endif %}
+
+  <form method="get" action="/billing" class="row g-2 align-items-end mb-4">
+    <div class="col-auto">
+      <label class="form-label small">Month</label>
+      <select name="month" class="form-select form-select-sm" onchange="this.form.submit()">
+        {% for m in months %}
+        <option value="{{ m }}" {% if m == month %}selected{% endif %}>{{ m }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="col-auto">
+      <label class="form-label small">Project</label>
+      <select name="project_id" class="form-select form-select-sm" onchange="this.form.submit()">
+        <option value="all" {% if project_filter == 'all' %}selected{% endif %}>All projects</option>
+        {% for p in all_projects %}
+        <option value="{{ p.id }}" {% if p.id == project_filter %}selected{% endif %}>{{ p.name }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="col-auto">
+      <a href="/billing/export.csv?month={{ month }}&project_id={{ project_filter }}"
+         class="btn btn-sm btn-outline-secondary">
+        <i class="bi bi-download me-1"></i>Export CSV
+      </a>
+    </div>
+    <div class="col-auto">
+      <a href="/billing/rates" class="btn btn-sm btn-outline-secondary">
+        <i class="bi bi-sliders me-1"></i>Rates
+      </a>
+    </div>
+    <div class="col-auto ms-auto">
+      <form method="post" action="/billing/reconcile" class="d-inline mb-0">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button class="btn btn-sm btn-outline-secondary" {% if is_readonly() %}disabled{% endif %}
+                title="Close sessions whose end event never arrived">
+          <i class="bi bi-arrow-repeat me-1"></i>Reconcile
+        </button>
+      </form>
+    </div>
+  </form>
+
+  {% if not has_data %}
+  {# The single highest-value onboarding step: without this config, no data ever arrives. #}
+  <div class="card mb-4">
+    <div class="card-body text-center py-5">
+      <i class="bi bi-graph-up" style="font-size: 3rem;" class="text-muted"></i>
+      <h5 class="mt-3">No usage recorded yet</h5>
+      <p class="text-muted">
+        The dashboard learns usage from LiveKit webhooks. Add this to your LiveKit
+        server's <code>config.yaml</code> and restart it.
+      </p>
+      <div class="text-start mx-auto" style="max-width: 34rem;">
+<pre class="bg-body-tertiary p-3 rounded small"><code>webhook:
+  api_key: {% if request.state.project %}{{ request.state.project.api_key }}{% else %}&lt;your API key&gt;{% endif %}
+
+  urls:
+    - {{ webhook_url }}
+
+# Needed for bandwidth measurement, which webhooks do not report.
+prometheus_port: 6789</code></pre>
+        <p class="text-muted small">
+          Then set the metrics URL on the project so bandwidth can be measured —
+          otherwise it is reported as not measured rather than estimated.
+        </p>
+      </div>
+      <a href="/projects" class="btn btn-primary btn-sm mt-2">Go to Projects</a>
+    </div>
+  </div>
+  {% else %}
+
+  <div class="row g-3 mb-4">
+    {% set cards = [
+      ("Participant minutes", rollup.participant_minutes | round(1), "bi-people"),
+      ("Room hours", (rollup.room_minutes / 60) | round(1), "bi-door-open"),
+      ("Peak concurrent", rollup.peak_concurrent_participants, "bi-arrow-up-right"),
+      ("Tracks published", rollup.tracks_published, "bi-mic"),
+    ] %}
+    {% for label, value, icon in cards %}
+    <div class="col-6 col-lg-3">
+      <div class="card h-100">
+        <div class="card-body">
+          <div class="text-muted small"><i class="bi {{ icon }} me-1"></i>{{ label }}</div>
+          <div class="fs-4 fw-semibold">{{ value | numformat }}</div>
+        </div>
+      </div>
+    </div>
+    {% endfor %}
+
+    <div class="col-6 col-lg-3">
+      <div class="card h-100">
+        <div class="card-body">
+          <div class="text-muted small"><i class="bi bi-arrow-down-up me-1"></i>Downstream bandwidth</div>
+          {% if quality.bandwidth_measured %}
+          <div class="fs-4 fw-semibold">{{ estimate.bandwidth_gb }} GB</div>
+          <div class="text-muted small">measured</div>
+          {% else %}
+          <div class="fs-4 fw-semibold text-muted">—</div>
+          <div class="text-muted small" title="LiveKit webhooks do not report bandwidth">
+            not measured
+          </div>
+          {% endif %}
+        </div>
+      </div>
+    </div>
+
+    <div class="col-6 col-lg-3">
+      <div class="card h-100">
+        <div class="card-body">
+          <div class="text-muted small"><i class="bi bi-record-circle me-1"></i>Egress minutes</div>
+          <div class="fs-4 fw-semibold">
+            {{ (rollup.egress_minutes.values() | sum) | round(1) }}
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="col-6 col-lg-3">
+      <div class="card h-100">
+        <div class="card-body">
+          <div class="text-muted small"><i class="bi bi-hdd me-1"></i>Egress output</div>
+          <div class="fs-4 fw-semibold">
+            {{ (rollup.egress_bytes / 1073741824) | round(2) }} GB
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="col-6 col-lg-3">
+      <div class="card h-100">
+        <div class="card-body">
+          <div class="text-muted small"><i class="bi bi-broadcast me-1"></i>Sessions</div>
+          <div class="fs-4 fw-semibold">{{ rollup.participant_sessions | numformat }}</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="row g-3 mb-4">
+    <div class="col-lg-7">
+      <div class="card h-100">
+        <div class="card-header"><h6 class="mb-0">Daily usage — {{ month }}</h6></div>
+        <div class="card-body"><canvas id="usageChart" height="140"></canvas></div>
+      </div>
+    </div>
+
+    <div class="col-lg-5">
+      <div class="card h-100">
+        <div class="card-header"><h6 class="mb-0">Estimated LiveKit Cloud cost</h6></div>
+        <div class="table-responsive">
+          <table class="table table-sm mb-0">
+            <thead>
+              <tr><th>Item</th><th class="text-end">Qty</th>
+                  <th class="text-end">Unit</th><th class="text-end">Amount</th></tr>
+            </thead>
+            <tbody>
+              {% for line in estimate.lines %}
+              <tr>
+                <td>{{ line.label }}
+                  {% if line.note %}<div class="text-muted small">{{ line.note }}</div>{% endif %}
+                </td>
+                <td class="text-end">{{ line.qty }} <span class="text-muted small">{{ line.unit }}</span></td>
+                <td class="text-end text-muted small">{{ "%.6f" | format(line.unit_price) }}</td>
+                <td class="text-end">{{ "%.2f" | format(line.amount) }}</td>
+              </tr>
+              {% endfor %}
+
+              {% for item in estimate.unmeasured %}
+              <tr class="text-muted">
+                <td>{{ item.label }}
+                  <div class="small">{{ item.reason }}</div>
+                </td>
+                <td class="text-end">—</td><td class="text-end">—</td>
+                <td class="text-end" title="Not measured — excluded from the total">
+                  not measured
+                </td>
+              </tr>
+              {% endfor %}
+
+              {% if estimate.platform_fee %}
+              <tr><td>Platform fee</td><td colspan="2"></td>
+                  <td class="text-end">{{ "%.2f" | format(estimate.platform_fee) }}</td></tr>
+              {% endif %}
+            </tbody>
+            <tfoot>
+              <tr class="fw-semibold border-top">
+                <td colspan="3">Estimated total</td>
+                <td class="text-end">{{ estimate.currency }} {{ "%.2f" | format(estimate.total) }}</td>
+              </tr>
+            </tfoot>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card mb-4">
+    <div class="card-header"><h6 class="mb-0">Self-hosting comparison</h6></div>
+    <div class="card-body">
+      {% if estimate.vps_monthly_cost > 0 %}
+      <div class="row text-center">
+        <div class="col-md-4">
+          <div class="text-muted small">LiveKit Cloud (estimated)</div>
+          <div class="fs-3">{{ estimate.currency }} {{ "%.2f" | format(estimate.total) }}</div>
+        </div>
+        <div class="col-md-4">
+          <div class="text-muted small">Your server (actual)</div>
+          <div class="fs-3">{{ estimate.currency }} {{ "%.2f" | format(estimate.vps_monthly_cost) }}</div>
+        </div>
+        <div class="col-md-4">
+          <div class="text-muted small">Difference</div>
+          <div class="fs-3 {% if estimate.savings > 0 %}text-success{% elif estimate.savings < 0 %}text-danger{% endif %}">
+            {{ estimate.currency }} {{ "%.2f" | format(estimate.savings) }}
+          </div>
+          {% if estimate.savings > 0 %}
+          <span class="badge bg-success">{{ estimate.savings_pct }}% saved</span>
+          {% elif estimate.savings < 0 %}
+          <span class="badge bg-danger">Cloud would be cheaper</span>
+          {% endif %}
+        </div>
+      </div>
+      {% if estimate.unmeasured %}
+      <p class="text-muted small text-center mt-3 mb-0">
+        {{ estimate.unmeasured | length }} cost component(s) are not measured, so the
+        Cloud figure is a lower bound.
+      </p>
+      {% endif %}
+      {% else %}
+      <p class="text-muted mb-0">
+        Enter your server's monthly cost on the
+        <a href="/billing/rates">rates page</a> to see the comparison.
+      </p>
+      {% endif %}
+    </div>
+  </div>
+
+  {% if project_filter == 'all' and per_project | length > 1 %}
+  <div class="card mb-4">
+    <div class="card-header"><h6 class="mb-0">Per project</h6></div>
+    <div class="table-responsive">
+      <table class="table table-sm mb-0">
+        <thead><tr><th>Project</th><th class="text-end">Participant min</th>
+                   <th class="text-end">Room hours</th><th class="text-end">Peak</th>
+                   <th class="text-end">Egress GB</th></tr></thead>
+        <tbody>
+          {% for pid, totals in per_project.items() %}
+          <tr>
+            <td>{{ project_names.get(pid, pid) }}</td>
+            <td class="text-end">{{ totals.participant_minutes | round(1) }}</td>
+            <td class="text-end">{{ (totals.room_minutes / 60) | round(1) }}</td>
+            <td class="text-end">{{ totals.peak_concurrent_participants }}</td>
+            <td class="text-end">{{ (totals.egress_bytes / 1073741824) | round(2) }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+  {% endif %}
+
+  {% if quality.estimated_pct or quality.dropped_events or quality.data_gap
+        or quality.bandwidth_gap or not quality.bandwidth_measured %}
+  <div class="alert alert-secondary small mb-0">
+    <strong><i class="bi bi-info-circle me-1"></i>Data quality</strong>
+    <ul class="mb-0 mt-2">
+      {% if quality.estimated_pct %}
+      <li>{{ quality.estimated_pct }}% of minutes ({{ quality.estimated_minutes }} min) were
+        estimated from sessions whose end event never arrived.</li>
+      {% endif %}
+      {% if quality.dropped_events %}
+      <li>LiveKit reported {{ quality.dropped_events }} dropped event(s); totals may be understated.</li>
+      {% endif %}
+      {% if quality.data_gap %}
+      <li>A gap in event delivery was detected this month.</li>
+      {% endif %}
+      {% if quality.bandwidth_gap %}
+      <li>The LiveKit server restarted during the month, so some bandwidth is uncounted.</li>
+      {% endif %}
+      {% if not quality.bandwidth_measured %}
+      <li>Bandwidth is not measured — set a Prometheus metrics URL on the project.</li>
+      {% endif %}
+    </ul>
+  </div>
+  {% endif %}
+
+  {% endif %}
+</div>
+{% endblock %}
+
+{% block extra_scripts %}
+{% if has_data %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<script>
+(function () {
+    const canvas = document.getElementById('usageChart');
+    if (!canvas) return;
+
+    const series = {{ series | tojson }};
+    const labels = series.map(d => d.day);
+
+    new Chart(canvas, {
+        type: 'bar',
+        data: {
+            labels: labels,
+            datasets: [
+                {
+                    label: 'Participant minutes',
+                    data: series.map(d => Math.round((d.participant_minutes || 0) * 10) / 10),
+                    yAxisID: 'y',
+                },
+                {
+                    label: 'Downstream GB',
+                    type: 'line',
+                    data: series.map(d => Math.round((d.bandwidth_bytes_down || 0) / 1073741824 * 100) / 100),
+                    yAxisID: 'y1',
+                    tension: 0.3,
+                },
+            ],
+        },
+        options: {
+            responsive: true,
+            interaction: { mode: 'index', intersect: false },
+            scales: {
+                y: { beginAtZero: true, title: { display: true, text: 'Minutes' } },
+                y1: {
+                    beginAtZero: true, position: 'right',
+                    grid: { drawOnChartArea: false },
+                    title: { display: true, text: 'GB' },
+                },
+            },
+        },
+    });
+})();
+</script>
+{% endif %}
+{% endblock %}

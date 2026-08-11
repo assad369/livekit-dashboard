@@ -1,66 +1,164 @@
-"""JSON file-backed store for room notes, tags, and pinned state."""
+"""Store for room notes, tags, and pinned state.
 
-import json
+Backed by MongoDB when configured (one document per project + room name),
+otherwise the original single-blob JSON file. `get_all_annotations()` returns
+the legacy blob shape either way so the rooms routes and templates are
+unaffected by which backend is in use.
+"""
+
 import os
-from typing import Dict, List
+from typing import List, Optional
+
+from app.services import store
 
 _STORE_PATH = os.environ.get("ROOM_ANNOTATIONS_FILE", "/tmp/room_annotations.json")
 
 PRESET_TAGS = ["prod", "demo", "support", "VIP"]
 
+COLLECTION = "room_annotations"
+
+def _empty() -> dict:
+    """A fresh blank blob.
+
+    Built per call rather than copied from a module constant — a shallow copy
+    would share the inner list and dicts, so appending a pin would mutate the
+    default itself and leak into every later read.
+    """
+    return {"pinned": [], "notes": {}, "tags": {}}
+
 
 def _load() -> dict:
-    try:
-        with open(_STORE_PATH) as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {"pinned": [], "notes": {}, "tags": {}}
+    data = store.read_json(_STORE_PATH, _empty())
+    for key, default in _empty().items():
+        data.setdefault(key, default)
+    return data
 
 
 def _save(data: dict) -> None:
-    with open(_STORE_PATH, "w") as f:
-        json.dump(data, f, indent=2)
+    store.write_json(_STORE_PATH, data)
 
 
-def get_pinned() -> List[str]:
-    return _load().get("pinned", [])
+def _doc_id(project_id: Optional[str], room_name: str) -> str:
+    return f"{store.scope(project_id)}:{room_name}"
 
 
-def pin_room(room_name: str) -> None:
-    data = _load()
-    if room_name not in data["pinned"]:
-        data["pinned"].append(room_name)
-    _save(data)
+async def get_pinned(project_id: Optional[str] = None) -> List[str]:
+    collection = store.collection(COLLECTION)
+    if collection is None:
+        return _load()["pinned"]
+
+    cursor = collection.find(
+        {"project_id": store.scope(project_id), "pinned": True}
+    )
+    return [doc["room_name"] async for doc in cursor]
 
 
-def unpin_room(room_name: str) -> None:
-    data = _load()
-    data["pinned"] = [r for r in data["pinned"] if r != room_name]
-    _save(data)
+async def pin_room(room_name: str, project_id: Optional[str] = None) -> None:
+    collection = store.collection(COLLECTION)
+    if collection is None:
+        data = _load()
+        if room_name not in data["pinned"]:
+            data["pinned"].append(room_name)
+        _save(data)
+        return
+
+    await collection.update_one(
+        {"_id": _doc_id(project_id, room_name)},
+        {
+            "$set": {"pinned": True},
+            "$setOnInsert": {
+                "project_id": store.scope(project_id),
+                "room_name": room_name,
+                "note": "",
+                "tags": [],
+            },
+        },
+        upsert=True,
+    )
 
 
-def get_annotations(room_name: str) -> dict:
-    data = _load()
+async def unpin_room(room_name: str, project_id: Optional[str] = None) -> None:
+    collection = store.collection(COLLECTION)
+    if collection is None:
+        data = _load()
+        data["pinned"] = [r for r in data["pinned"] if r != room_name]
+        _save(data)
+        return
+
+    await collection.update_one(
+        {"_id": _doc_id(project_id, room_name)}, {"$set": {"pinned": False}}
+    )
+
+
+async def get_annotations(room_name: str, project_id: Optional[str] = None) -> dict:
+    collection = store.collection(COLLECTION)
+    if collection is None:
+        data = _load()
+        return {
+            "note": data["notes"].get(room_name, ""),
+            "tags": data["tags"].get(room_name, []),
+            "pinned": room_name in data["pinned"],
+        }
+
+    doc = await collection.find_one({"_id": _doc_id(project_id, room_name)})
+    if doc is None:
+        return {"note": "", "tags": [], "pinned": False}
     return {
-        "note": data.get("notes", {}).get(room_name, ""),
-        "tags": data.get("tags", {}).get(room_name, []),
-        "pinned": room_name in data.get("pinned", []),
+        "note": doc.get("note", ""),
+        "tags": doc.get("tags", []),
+        "pinned": bool(doc.get("pinned", False)),
     }
 
 
-def set_annotations(room_name: str, note: str, tags: List[str]) -> None:
-    data = _load()
-    if "notes" not in data:
-        data["notes"] = {}
-    if "tags" not in data:
-        data["tags"] = {}
-    data["notes"][room_name] = note
-    data["tags"][room_name] = tags
-    _save(data)
+async def set_annotations(
+    room_name: str,
+    note: str,
+    tags: List[str],
+    project_id: Optional[str] = None,
+) -> None:
+    collection = store.collection(COLLECTION)
+    if collection is None:
+        data = _load()
+        data["notes"][room_name] = note
+        data["tags"][room_name] = tags
+        _save(data)
+        return
+
+    await collection.update_one(
+        {"_id": _doc_id(project_id, room_name)},
+        {
+            "$set": {"note": note, "tags": tags},
+            "$setOnInsert": {
+                "project_id": store.scope(project_id),
+                "room_name": room_name,
+                "pinned": False,
+            },
+        },
+        upsert=True,
+    )
 
 
-def get_all_annotations() -> dict:
-    return _load()
+async def get_all_annotations(project_id: Optional[str] = None) -> dict:
+    """Return the legacy `{pinned, notes, tags}` blob shape.
+
+    Reassembled from per-room documents under Mongo so the callers in
+    app/routes/rooms.py and their templates need no changes.
+    """
+    collection = store.collection(COLLECTION)
+    if collection is None:
+        return _load()
+
+    data = {"pinned": [], "notes": {}, "tags": {}}
+    cursor = collection.find({"project_id": store.scope(project_id)})
+    async for doc in cursor:
+        room = doc["room_name"]
+        if doc.get("pinned"):
+            data["pinned"].append(room)
+        if doc.get("note"):
+            data["notes"][room] = doc["note"]
+        if doc.get("tags"):
+            data["tags"][room] = doc["tags"]
+    return data
 
 
 def build_timeline(room, participants: list) -> list:

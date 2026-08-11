@@ -124,3 +124,35 @@ async def test_enhanced_analytics_error_fallback_is_honest(lk):
     assert result["connection_success"] == 0
     assert result["platforms"] == {}
     assert result["connection_types"] == {}
+
+
+# ---------------------------------------------------------------------------
+# Where real usage data now comes from
+# ---------------------------------------------------------------------------
+
+async def test_enhanced_analytics_connection_minutes_still_zero_by_design():
+    """LiveKit's real-time API has no history, so it cannot report minutes.
+
+    This is not a gap waiting to be filled in here. Real connection minutes are
+    derived from stored LiveKit webhook events by app/services/usage.py and
+    injected into DashboardStats by gather_dashboard_stats(usage_provider=...).
+    Estimating them from a live room snapshot is exactly the fabrication this
+    module exists to prevent.
+    """
+    from app.services.livekit import LiveKitClient
+
+    lk = LiveKitClient()
+    with patch.object(lk, "list_rooms", new=AsyncMock(return_value=([], 0.01))), \
+         patch.object(lk, "get_all_participants_across_rooms", new=AsyncMock(return_value=[])):
+        analytics = await lk.get_enhanced_analytics()
+
+    assert analytics["connection_minutes"] == 0
+    assert analytics["platforms"] == {}
+    assert analytics["connection_types"] == {}
+
+
+def test_the_webhook_analytics_stub_is_gone():
+    """It returned zeros with a TODO; usage.get_webhook_analytics is the real one."""
+    from app.services.livekit import LiveKitClient
+
+    assert not hasattr(LiveKitClient, "get_webhook_analytics")

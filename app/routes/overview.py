@@ -1,12 +1,15 @@
 """Overview/Dashboard routes"""
 
 import asyncio
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from app.services.livekit import LiveKitClient, get_livekit_client
+from app.db import mongo
+from app.services import usage
 from app.services.dashboard import gather_dashboard_stats
 from app.services import anomaly
 from app.security.basic_auth import requires_admin, get_current_user
@@ -56,8 +59,19 @@ async def overview(
     filters = parse_filters(request)
     """Display overview dashboard with health summary and analytics"""
 
+    # Real connection minutes come from stored webhook data, not the LiveKit
+    # real-time API, which has no history to report.
+    async def _connection_minutes():
+        db = mongo.get_database()
+        project = request.scope.get("state", {}).get("project")
+        if db is None or project is None:
+            return None
+        now = datetime.now(timezone.utc)
+        start_of_day = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        return await usage.get_connection_minutes(db, project.id, start_of_day, now)
+
     gather_tasks = [
-        gather_dashboard_stats(lk),
+        gather_dashboard_stats(lk, usage_provider=_connection_minutes),
         lk.get_server_info(),
         lk.get_room_analytics(),
         lk.get_egress_analytics(),
@@ -83,6 +97,7 @@ async def overview(
     analytics = {
         "connection_success": health_stats.connection_success_pct,
         "connection_minutes": health_stats.connection_minutes,
+        "connection_minutes_source": health_stats.connection_minutes_source,
         "platforms": health_stats.platforms,
         "connection_types": health_stats.connection_types,
     }

@@ -11,9 +11,9 @@ def test_health_check(client):
     assert response.text == "OK"
 
 
-def test_overview_requires_auth(client):
+def test_overview_requires_auth(unauth_client):
     """Test that overview page requires authentication"""
-    response = client.get("/")
+    response = unauth_client.get("/")
     assert response.status_code == status.HTTP_401_UNAUTHORIZED
 
 
@@ -25,9 +25,9 @@ def test_overview_with_auth(client, auth_headers):
     assert response.status_code in [status.HTTP_200_OK, status.HTTP_500_INTERNAL_SERVER_ERROR]
 
 
-def test_rooms_requires_auth(client):
+def test_rooms_requires_auth(unauth_client):
     """Test that rooms page requires authentication"""
-    response = client.get("/rooms")
+    response = unauth_client.get("/rooms")
     assert response.status_code == status.HTTP_401_UNAUTHORIZED
 
 
@@ -37,27 +37,48 @@ def test_logout_page(client):
     assert response.status_code == status.HTTP_200_OK
 
 
-def test_invalid_auth(client):
-    """Test with invalid credentials"""
+def test_invalid_auth(unauth_client):
+    """Bad credentials must not establish a session.
+
+    HTTP Basic is gone, so an Authorization header is simply ignored — the
+    only way in is a session cookie from POST /login.
+    """
+    from tests.conftest import csrf_for
+
+    response = unauth_client.post(
+        "/login",
+        data={
+            "username": "invalid",
+            "password": "wrong",
+            "csrf_token": csrf_for(unauth_client),
+            "next": "/",
+        },
+        follow_redirects=False,
+    )
+    assert response.status_code == status.HTTP_401_UNAUTHORIZED
+
+    # And the dashboard is still closed to this client.
+    assert unauth_client.get("/").status_code == status.HTTP_401_UNAUTHORIZED
+
+
+def test_basic_auth_header_is_no_longer_accepted(unauth_client):
+    """Guards against a regression back to header-based auth."""
     import base64
-    
-    credentials = "invalid:wrong"
-    encoded = base64.b64encode(credentials.encode()).decode()
-    headers = {"Authorization": f"Basic {encoded}"}
-    
-    response = client.get("/", headers=headers)
+
+    encoded = base64.b64encode(b"admin:testpass").decode()
+    response = unauth_client.get("/", headers={"Authorization": f"Basic {encoded}"})
     assert response.status_code == status.HTTP_401_UNAUTHORIZED
 
 
-def test_settings_requires_auth(client):
+def test_settings_requires_auth(unauth_client):
     """Test that settings page requires authentication"""
-    response = client.get("/settings")
+    response = unauth_client.get("/settings")
     assert response.status_code == status.HTTP_401_UNAUTHORIZED
 
 
-def test_sandbox_requires_auth(client):
+def test_sandbox_requires_auth(unauth_client):
     """Test that sandbox page requires authentication"""
-    response = client.get("/sandbox")
+    response = unauth_client.get("/sandbox")
     assert response.status_code == status.HTTP_401_UNAUTHORIZED
 
 

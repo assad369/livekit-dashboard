@@ -18,8 +18,13 @@ router = APIRouter(prefix="/events")
 _POLL_INTERVAL = 5  # seconds between LiveKit polls
 
 
-async def _sse_generator(lk: LiveKitClient):
-    """Yield SSE events by polling LiveKit and diffing room/participant state."""
+async def _sse_generator(lk: LiveKitClient, request: Request):
+    """Yield SSE events by polling LiveKit and diffing room/participant state.
+
+    Each connected browser tab drives its own poll loop, so the loop must stop
+    when the client goes away — otherwise closing a tab leaves a task polling
+    LiveKit every 5 s for the lifetime of the process.
+    """
     known_rooms: dict[str, set[str]] = {}  # room_name -> set of participant identities
 
     def _now() -> str:
@@ -32,6 +37,10 @@ async def _sse_generator(lk: LiveKitClient):
     yield ": keepalive\n\n"
 
     while True:
+        if await request.is_disconnected():
+            logger.debug("SSE client disconnected; stopping poll loop")
+            break
+
         try:
             rooms, _ = await lk.list_rooms()
             current_rooms: dict[str, set[str]] = {}
@@ -87,7 +96,7 @@ async def events_stream(
 ):
     """SSE endpoint — yields room/participant change events every 5 s."""
     return StreamingResponse(
-        _sse_generator(lk),
+        _sse_generator(lk, request),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

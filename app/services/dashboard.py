@@ -8,10 +8,14 @@ LiveKit API is unavailable.
 from __future__ import annotations
 
 import asyncio
+import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
 from app.services.livekit import LiveKitClient
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -25,6 +29,9 @@ class DashboardStats:
     ingress_active: int = 0
     connection_success_pct: float = 0.0
     connection_minutes: int = 0
+    # "none" until webhook-derived usage data is available. The overview page
+    # renders an em-dash rather than a misleading 0 when this is "none".
+    connection_minutes_source: str = "none"
     platforms: dict[str, int] = field(default_factory=dict)
     connection_types: dict[str, int] = field(default_factory=dict)
     api_latency_ms: float = 0.0
@@ -33,12 +40,21 @@ class DashboardStats:
     error: str | None = None
 
 
-async def gather_dashboard_stats(lk: LiveKitClient) -> DashboardStats:
+async def gather_dashboard_stats(
+    lk: LiveKitClient,
+    *,
+    usage_provider: Callable[[], Awaitable[float | None]] | None = None,
+) -> DashboardStats:
     """Return shaped top-line stats, never raising.
 
     Falls back to zero-values on LiveKit errors so the UI always renders.
     Individual sub-queries that fail are silently skipped — only the
     rooms call is treated as fatal since every other stat depends on it.
+
+    *usage_provider* optionally supplies real connection minutes from stored
+    webhook data. LiveKit's real-time API has no history, so it genuinely
+    cannot answer that question — see get_enhanced_analytics. When the provider
+    is absent or returns None, connection_minutes stays 0 with source "none".
     """
     stats = DashboardStats(sip_enabled=lk.sip_enabled)
 
@@ -82,6 +98,18 @@ async def gather_dashboard_stats(lk: LiveKitClient) -> DashboardStats:
 
     if lk.sip_enabled and len(results) > 4 and not isinstance(results[4], Exception):
         stats.sip_trunks = results[4].get("total_trunks", 0)
+
+    if usage_provider is not None:
+        try:
+            minutes = await usage_provider()
+        except Exception as exc:
+            # An analytics failure must never break the overview page — same
+            # contract as the sub-queries above.
+            logger.warning("usage provider failed: %s", exc)
+            minutes = None
+        if minutes is not None:
+            stats.connection_minutes = int(minutes)
+            stats.connection_minutes_source = "webhooks"
 
     return stats
 

@@ -1,14 +1,18 @@
 # LiveKit Dashboard
 
-A **stateless**, self-hosted, server-side rendered (SSR) dashboard for managing a private [LiveKit](https://livekit.io) server. Built with **FastAPI** and **Jinja2** templates, using only the LiveKit Python SDK for real-time server management.
+A self-hosted, server-side rendered (SSR) dashboard for managing private [LiveKit](https://livekit.io) servers. Built with **FastAPI** and **Jinja2** templates.
+
+Live state (rooms, participants, egress) is read straight from the LiveKit API on every request. MongoDB is optional and adds the things an API snapshot cannot provide: the admin account, multiple projects, operator state that survives a restart, and the usage history behind the billing estimate. Without `MONGODB_URI` the dashboard still runs against a single server configured through environment variables.
 
 
 ## ✨ Features
 
 ![LiveKit Dashboard](./docs/images/dashboard-overview.png)
 
-- 🎯 **Stateless Architecture** - No database, no Redis, no background workers
-- 🔐 **Simple Authentication** - HTTP Basic Auth with one admin account
+- 🔐 **Session Authentication** - Login form, signed session cookie, argon2 password hash
+- 🗂️ **Multiple Projects** - One dashboard across several LiveKit deployments, with a project switcher
+- 💰 **Billing Estimate** - Real usage from LiveKit webhooks priced against LiveKit Cloud's rate card
+- 🗄️ **Optional MongoDB** - Persists projects, usage history, alerts, saved views and the audit log
 - 📊 **Comprehensive Analytics** - Real-time analytics for all LiveKit services
 - 🏠 **Overview Dashboard** - Server status, active rooms, participants count, SDK latency
 - 🚪 **Room Management** - List, create, close rooms; view participants and tracks
@@ -52,7 +56,7 @@ A **stateless**, self-hosted, server-side rendered (SSR) dashboard for managing 
 ```
 ┌─────────────────────────────────────────────────────┐
 │                    User Browser                     │
-│              (HTTP Basic Auth)                      │
+│           (Session cookie authentication)           │
 └────────────────────┬────────────────────────────────┘
                      │ HTTPS
                      ▼
@@ -76,10 +80,10 @@ A **stateless**, self-hosted, server-side rendered (SSR) dashboard for managing 
 
 ### Key Principles
 
-- **Stateless**: All data is fetched directly from LiveKit on each request
+- **Live-first**: Room and participant state is fetched from LiveKit on each request, never cached into staleness
 - **SSR**: Server-side rendered HTML with Jinja2 templates
 - **Progressive Enhancement**: HTMX for auto-refresh and better UX
-- **Secure**: HTTP Basic Auth, CSRF protection, security headers
+- **Secure**: Session auth enforced by middleware (deny-by-default), session-bound CSRF tokens, security headers, API secrets encrypted at rest
 - **Minimal**: No external dependencies beyond FastAPI and LiveKit SDK
 
 ## 🚀 Quick Start
@@ -164,14 +168,24 @@ LIVEKIT_API_KEY=your-api-key
 LIVEKIT_API_SECRET=your-api-secret
 
 # Admin Authentication
+# Used to bootstrap the admin account on first run, and as a fallback if
+# MongoDB is unavailable so an outage cannot lock you out of the dashboard.
 ADMIN_USERNAME=admin
 ADMIN_PASSWORD=changeme
 
 # Application Settings
 APP_SECRET_KEY=your-secret-key-for-csrf-and-sessions
+# Encrypts project API secrets at rest. BACK THIS UP — losing it makes stored
+# project secrets unrecoverable. Generate with: openssl rand -base64 32
+APP_ENCRYPTION_KEY=
 DEBUG=false
 HOST=0.0.0.0
 PORT=8000
+
+# MongoDB (optional). Without it the dashboard runs against the LIVEKIT_*
+# variables above, with no projects, usage history or billing.
+MONGODB_URI=
+MONGODB_DB=livekit_dashboard
 
 # Feature Flags
 ENABLE_SIP=false
@@ -186,7 +200,20 @@ ENABLE_SIP=false
 | `LIVEKIT_API_SECRET` | ✅        | -          | LiveKit API secret                                                |
 | `ADMIN_USERNAME`     | ✅        | `admin`    | Dashboard admin username                                          |
 | `ADMIN_PASSWORD`     | ✅        | `changeme` | Dashboard admin password                                          |
-| `APP_SECRET_KEY`     | ✅        | -          | Secret key for CSRF tokens (generate with `openssl rand -hex 32`) |
+| `APP_SECRET_KEY`     | ✅        | -          | Signs session cookies and CSRF tokens (`openssl rand -hex 32`)    |
+| `APP_ENCRYPTION_KEY` | ❌        | derived    | Encrypts project API secrets at rest (`openssl rand -base64 32`). **Back this up.** Derived from `APP_SECRET_KEY` if unset |
+| `APP_ENCRYPTION_KEY_OLD` | ❌    | -          | Previous encryption key, kept readable during a key rotation      |
+| `MONGODB_URI`        | ❌        | -          | Connection string. Unset ⇒ single-project mode, no usage history  |
+| `MONGODB_DB`         | ❌        | `livekit_dashboard` | Database name                                            |
+| `MONGODB_REQUIRED`   | ❌        | `false`    | Fail startup instead of degrading when MongoDB is unreachable     |
+| `SESSION_MAX_AGE`    | ❌        | `86400`    | Session lifetime in seconds                                       |
+| `SESSION_HTTPS_ONLY` | ❌        | `true`     | Only send the session cookie over HTTPS. Set `false` for local HTTP |
+| `DASHBOARD_ROLE`     | ❌        | `admin`    | Set to `readonly` to block all mutating requests                  |
+| `TRUST_PROXY_HEADERS` | ❌       | `false`    | Read the client IP from `X-Forwarded-For` for login throttling. Enable **only** behind a proxy that overwrites the header |
+| `USAGE_EVENTS_TTL_DAYS` | ❌     | `90`       | Retention for raw webhook events (rollups are never expired)      |
+| `AUDIT_TTL_DAYS`     | ❌        | `365`      | Retention for audit log entries                                   |
+| `LIVEKIT_BANDWIDTH_METRIC_DOWN` | ❌ | auto    | Prometheus metric to read downstream bytes from, if auto-detection fails |
+| `LIVEKIT_BANDWIDTH_METRIC_UP` | ❌  | auto    | Prometheus metric to read upstream bytes from                     |
 | `DEBUG`              | ❌        | `false`    | Enable debug mode                                                 |
 | `HOST`               | ❌        | `0.0.0.0`  | Host to bind to                                                   |
 | `PORT`               | ❌        | `8000`     | Port to listen on                                                 |
@@ -286,6 +313,96 @@ Requires `ENABLE_HOMER=true` and Homer/SIPCAPTURE credentials in your `.env`.
 - Review security settings
 - See feature flags
 
+## 💰 Projects & Billing
+
+### Multiple projects
+
+Each project is one LiveKit deployment with its own URL and API key pair. Two
+projects may point at the same server with different keys. Add them on
+**/projects**; a switcher appears in the top bar once there is more than one,
+and it scopes every page — rooms, egress, alerts, pins, audit log and usage.
+
+API secrets are encrypted before storage using `APP_ENCRYPTION_KEY`. **Back that
+key up.** Without it, stored project secrets cannot be recovered.
+
+With no `MONGODB_URI`, the `LIVEKIT_*` environment variables act as a single
+implicit project and everything behaves as it did before.
+
+### Usage tracking
+
+Usage comes from LiveKit webhooks, which carry authoritative timestamps.
+Add this to each LiveKit server's `config.yaml`, using that project's API key,
+and restart LiveKit:
+
+```yaml
+webhook:
+  api_key: <that project's API key>
+  urls:
+    - https://your-dashboard.example.com/webhooks/livekit
+
+# Enables bandwidth measurement (see below).
+prometheus_port: 6789
+```
+
+Deliveries are authenticated by the JWT LiveKit signs them with — the endpoint
+needs no dashboard login, and it is exempt from readonly mode. Retries are
+deduplicated by event id, so a redelivery never double-counts.
+
+The dashboard records participant-minutes, room-hours, peak concurrency, egress
+and ingress minutes by type, egress output bytes and track counts.
+
+### Bandwidth
+
+**LiveKit webhooks do not report bandwidth**, and LiveKit Cloud bills on
+downstream GB. To measure it, set `prometheus_port` as above and put the
+resulting metrics URL on the project (for example
+`http://livekit.example.com:6789/metrics`). A background collector samples it
+every 60 s and stores the deltas.
+
+Keep that port reachable from the dashboard but **not** from the public internet.
+
+If no metrics URL is set, bandwidth is reported as *not measured* rather than
+estimated, and the Cloud cost estimate is presented as a lower bound. Nothing is
+inferred from bitrate.
+
+If the collector cannot recognise the byte counters on your LiveKit build, it
+logs the metric names it did find; set `LIVEKIT_BANDWIDTH_METRIC_DOWN` and
+`LIVEKIT_BANDWIDTH_METRIC_UP` to pick them explicitly.
+
+### Cost estimate
+
+**/billing** prices a month's usage against a LiveKit Cloud rate card and
+compares it with what you actually pay for the server.
+
+The card ships pre-filled with LiveKit's published entry-tier figures and is
+flagged **unverified** until you confirm it on **/billing/rates**. That is
+deliberate: LiveKit retired participant-minute pricing in favour of a
+bandwidth-and-transcoding model, both models are volume-tiered, and prices
+change — so check the numbers against
+[livekit.io/pricing](https://livekit.io/pricing) before trusting the total.
+The card supports either model.
+
+Enter your server's monthly cost on the same page to get the savings figure.
+
+Anything not measured appears as "not measured", never as a $0 line, and the
+page footer discloses estimated minutes, dropped events and bandwidth gaps.
+
+Give it a few days of real traffic before drawing conclusions — a cost estimate
+from one hour of data invites the wrong ones.
+
+### Migrating from the old /tmp files
+
+Alerts, saved views, room pins and notes, the audit log and notification config
+used to live in JSON files under `/tmp` and were lost on every restart. To carry
+existing data into MongoDB:
+
+```bash
+poetry run python scripts/migrate_json_stores.py --project-slug <slug> --dry-run
+poetry run python scripts/migrate_json_stores.py --project-slug <slug>
+```
+
+The script is idempotent, so a re-run after a partial failure is safe.
+
 ## 🛠️ Development
 
 ### Available Commands
@@ -326,7 +443,7 @@ livekit-dashboard/
 │   │   ├── livekit.py          # LiveKit SDK wrapper
 │   │   └── homer.py            # Homer JWT auth + API client
 │   ├── security/               # Security modules
-│   │   ├── basic_auth.py       # HTTP Basic Auth
+│   │   ├── basic_auth.py       # Session auth helpers for routes
 │   │   └── csrf.py             # CSRF protection
 │   ├── templates/              # Jinja2 templates
 │   │   ├── base.html.j2        # Base template
@@ -537,7 +654,7 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 
 - ✅ App is stateless: no DB/Redis/background workers
 - ✅ All data fetched directly from LiveKit per request
-- ✅ HTTP Basic Auth using one admin account from env
+- ✅ Login form + session cookie, one admin account (bootstrapped from env)
 - ✅ All routes protected except `/health` and `/logout`
 - ✅ SSR pages: `/`, `/rooms`, `/rooms/{name}`, `/sip-outbound`, `/sip-inbound`, `/settings`, `/sandbox`
 - ✅ Docker image builds and runs with environment variables

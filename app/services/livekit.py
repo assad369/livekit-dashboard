@@ -3,6 +3,7 @@
 import asyncio
 import base64
 import datetime
+import hashlib
 import json
 import logging
 import os
@@ -11,6 +12,7 @@ from typing import List, Optional, Tuple, Dict, Any
 
 logger = logging.getLogger(__name__)
 
+from fastapi import Request
 from livekit import api, rtc
 
 from app.services import cache as dispatch_cache
@@ -19,26 +21,58 @@ from app.services import cache as dispatch_cache
 class LiveKitClient:
     """Wrapper for LiveKit SDK clients with error handling and metrics - Pure Async"""
 
-    def __init__(self):
-        self.url = os.environ["LIVEKIT_URL"]
-        self.key = os.environ["LIVEKIT_API_KEY"]
-        self.secret = os.environ["LIVEKIT_API_SECRET"]
+    def __init__(
+        self,
+        url: Optional[str] = None,
+        key: Optional[str] = None,
+        secret: Optional[str] = None,
+        *,
+        sip_enabled: Optional[bool] = None,
+        project_id: str = "env",
+        project_slug: str = "env",
+    ):
+        # Credentials are explicit when the client comes from a configured
+        # project; the env fallback keeps the single-project deployment (and
+        # the test suite) working with a bare LiveKitClient().
+        self.url = url if url is not None else os.environ["LIVEKIT_URL"]
+        self.key = key if key is not None else os.environ["LIVEKIT_API_KEY"]
+        self.secret = secret if secret is not None else os.environ["LIVEKIT_API_SECRET"]
 
         # Don't create the API instance here - do it lazily in async context
         self._lk_api = None
+        self._api_lock = asyncio.Lock()
 
         # SIP is optional
-        self.sip_enabled = os.environ.get("ENABLE_SIP", "false").lower() == "true"
+        self.sip_enabled = (
+            os.environ.get("ENABLE_SIP", "false").lower() == "true"
+            if sip_enabled is None
+            else bool(sip_enabled)
+        )
+
+        self.project_id = project_id
+        self.project_slug = project_slug
+
+        # Identity for module-level caches. Includes a credential fingerprint
+        # so two projects pointed at the same URL with different API keys never
+        # share cached results, and so editing credentials yields a fresh key.
+        fingerprint = hashlib.sha1(f"{self.url}|{self.key}".encode()).hexdigest()[:12]
+        self.cache_key = f"{project_id}|{fingerprint}"
 
     async def _get_api(self):
         """Get or create LiveKit API instance in async context"""
-        if self._lk_api is None:
-            self._lk_api = api.LiveKitAPI(
-                url=self.url,
-                api_key=self.key,
-                api_secret=self.secret,
-            )
-            await self._lk_api.__aenter__()
+        if self._lk_api is not None:
+            return self._lk_api
+        # Clients are pooled and shared across concurrent requests, so guard
+        # construction; aiohttp's own session is concurrency-safe once built.
+        async with self._api_lock:
+            if self._lk_api is None:
+                lk_api = api.LiveKitAPI(
+                    url=self.url,
+                    api_key=self.key,
+                    api_secret=self.secret,
+                )
+                await lk_api.__aenter__()
+                self._lk_api = lk_api
         return self._lk_api
 
     async def close(self):
@@ -1140,8 +1174,8 @@ class LiveKitClient:
         agent worker connected and is suppressed silently.
         """
         # A — cache hit
-        if dispatch_cache.is_fresh(self.url):
-            entry = dispatch_cache.get(self.url)
+        if dispatch_cache.is_fresh(self.cache_key):
+            entry = dispatch_cache.get(self.cache_key)
             return entry["data"], entry["latency"]
 
         t0 = time.perf_counter()
@@ -1167,7 +1201,7 @@ class LiveKitClient:
         all_dispatches = [d for batch in results for d in batch]
         latency = time.perf_counter() - t0
 
-        dispatch_cache.set(self.url, all_dispatches, latency)
+        dispatch_cache.set(self.cache_key, all_dispatches, latency)
         return all_dispatches, latency
 
     async def create_dispatch(self, agent_name: str, room: str, metadata: str = "") -> Any:
@@ -1175,14 +1209,14 @@ class LiveKitClient:
         lk = await self._get_api()
         req = api.CreateAgentDispatchRequest(agent_name=agent_name, room=room, metadata=metadata)
         result = await lk.agent_dispatch.create_dispatch(req)
-        dispatch_cache.invalidate(self.url)
+        dispatch_cache.invalidate(self.cache_key)
         return result
 
     async def delete_dispatch(self, dispatch_id: str, room: str) -> Any:
         """Delete an agent dispatch."""
         lk = await self._get_api()
         result = await lk.agent_dispatch.delete_dispatch(dispatch_id, room)
-        dispatch_cache.invalidate(self.url)
+        dispatch_cache.invalidate(self.cache_key)
         return result
 
     # Room Analytics
@@ -1380,25 +1414,9 @@ class LiveKitClient:
             }
 
     # Webhook Analytics (for future enhancement)
-    async def get_webhook_analytics(self) -> dict:
-        """
-        Get analytics from stored webhook events.
-        This would require a database to store webhook events over time.
-        """
-        # This is a placeholder for webhook-based analytics
-        # In a real implementation, you would:
-        # 1. Set up webhook endpoints to receive LiveKit events
-        # 2. Store events in a database (participant_joined, participant_left, etc.)
-        # 3. Query the database for analytics data
-
-        # For now, return empty data
-        return {
-            "has_webhook_data": False,
-            "participant_joins_today": 0,
-            "participant_leaves_today": 0,
-            "room_creates_today": 0,
-            "track_publishes_today": 0,
-        }
+    # NOTE: get_webhook_analytics used to live here as a stub returning zeros
+    # with a TODO about needing a database. It is now implemented for real in
+    # app/services/usage.py, against the webhook events stored in MongoDB.
 
     # Enhanced Analytics (combining real-time + historical)
     async def get_enhanced_analytics(self) -> dict:
@@ -1756,6 +1774,22 @@ class LiveKitClient:
 
 
 # Dependency injection helper
-def get_livekit_client() -> LiveKitClient:
-    """FastAPI dependency to get LiveKit client"""
-    return LiveKitClient()
+async def get_livekit_client(request: Request) -> LiveKitClient:
+    """FastAPI dependency to get the LiveKit client for the active project.
+
+    Every route already depends on this, so resolving the project here is what
+    makes the whole dashboard multi-project without touching those routes.
+    Clients are pooled rather than constructed per request — the old version
+    built a fresh one each time and never closed it, leaking an aiohttp
+    session on every request.
+    """
+    # Imported lazily: both modules import from this one.
+    from app.db import mongo
+    from app.services import lk_pool, projects
+
+    project = request.scope.get("state", {}).get("project")
+    if project is None:
+        project = await projects.resolve_active(
+            getattr(request, "session", {}), mongo.get_database()
+        )
+    return await lk_pool.get_client(project)

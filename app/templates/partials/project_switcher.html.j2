@@ -1,0 +1,30 @@
+{# Scopes every page to one LiveKit deployment. Hidden when there is only one
+   project, so the single-project deployment sees no change. #}
+{% set projects = request.state.projects or [] %}
+{% set active = request.state.project %}
+{% if projects | length > 1 and active %}
+<div class="dropdown">
+  <button class="btn btn-sm btn-outline-secondary dropdown-toggle" type="button"
+          data-bs-toggle="dropdown" aria-expanded="false" title="Active project">
+    <i class="bi bi-diagram-3 me-1"></i>{{ active.name }}
+  </button>
+  <ul class="dropdown-menu dropdown-menu-end">
+    {% for project in projects %}
+    <li>
+      <form method="post" action="/projects/switch" class="mb-0">
+        <input type="hidden" name="csrf_token" value="{{ request.state.csrf_token }}">
+        <input type="hidden" name="project_id" value="{{ project.id }}">
+        <input type="hidden" name="next" value="{{ request.url.path }}">
+        <button type="submit"
+                class="dropdown-item{% if project.id == active.id %} active{% endif %}">
+          {{ project.name }}
+          {% if project.is_default %}<span class="text-muted small">(default)</span>{% endif %}
+        </button>
+      </form>
+    </li>
+    {% endfor %}
+    <li><hr class="dropdown-divider"></li>
+    <li><a class="dropdown-item" href="/projects">Manage projects…</a></li>
+  </ul>
+</div>
+{% endif %}

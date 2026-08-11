@@ -1,32 +1,42 @@
+{# Logout mutates state, so it happens via POST. A GET-triggered logout could
+   be fired by an <img> tag on any other site. #}
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-bs-theme="dark">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Logout - LiveKit Dashboard</title>
+    <meta name="csrf-token" content="{{ request.state.csrf_token }}">
+    <title>Sign out - LiveKit Dashboard</title>
+    <link rel="icon" href="/static/favicon.png">
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css" rel="stylesheet">
+    <link href="/static/css/style.css?v={{ css_version }}" rel="stylesheet">
 </head>
-<body class="bg-light">
-    <div class="container">
-        <div class="row justify-content-center mt-5">
-            <div class="col-md-6">
-                <div class="card">
-                    <div class="card-body text-center py-5">
-                        <i class="bi bi-check-circle text-success" style="font-size: 4rem;"></i>
-                        <h1 class="mt-3">Logged Out</h1>
-                        <p class="lead">You have been successfully logged out.</p>
-                        <p class="text-muted">
-                            To log back in, please <a href="/">click here</a>. 
-                            Your browser will prompt for credentials again.
-                        </p>
-                        <a href="/" class="btn btn-primary mt-3">
-                            Return to Dashboard
-                        </a>
-                    </div>
+<body>
+<div class="container">
+    <div class="row justify-content-center align-items-center" style="min-height: 100vh;">
+        <div class="col-md-5 col-lg-4">
+            <div class="card shadow-sm">
+                <div class="card-body text-center p-4">
+                    {% if signed_in %}
+                        <i class="bi bi-box-arrow-right" style="font-size: 3rem;"></i>
+                        <h1 class="h4 mt-3">Sign out?</h1>
+                        <p class="text-muted">You will need to sign in again to continue.</p>
+                        <form method="post" action="/logout">
+                            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                            <button type="submit" class="btn btn-primary w-100">Sign out</button>
+                        </form>
+                        <a href="/" class="btn btn-link mt-2">Cancel</a>
+                    {% else %}
+                        <i class="bi bi-check-circle text-success" style="font-size: 3rem;"></i>
+                        <h1 class="h4 mt-3">Signed out</h1>
+                        <p class="text-muted">You have been signed out.</p>
+                        <a href="/login" class="btn btn-primary w-100">Sign in again</a>
+                    {% endif %}
                 </div>
             </div>
         </div>
     </div>
+</div>
 </body>
 </html>
-

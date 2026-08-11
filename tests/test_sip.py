@@ -7,6 +7,8 @@ import pytest
 from fastapi import status
 from fastapi.testclient import TestClient
 
+from tests.conftest import log_in
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -18,9 +20,9 @@ def _auth_headers():
     return {"Authorization": f"Basic {base64.b64encode(creds.encode()).decode()}"}
 
 
-def _csrf_token():
-    from app.security.csrf import generate_csrf_token
-    return generate_csrf_token()
+def _csrf_token(c):
+    from tests.conftest import csrf_for
+    return csrf_for(c)
 
 
 def _make_mock_lk(sip_enabled: bool = True):
@@ -54,6 +56,7 @@ def sip_client():
     app.dependency_overrides[get_livekit_client] = lambda: mock_lk
 
     with TestClient(app, raise_server_exceptions=False) as c:
+        log_in(c)
         yield c, mock_lk
 
     app.dependency_overrides.pop(get_livekit_client, None)
@@ -71,6 +74,7 @@ def sip_disabled_client():
     app.dependency_overrides[get_livekit_client] = lambda: mock_lk
 
     with TestClient(app, raise_server_exceptions=False) as c:
+        log_in(c)
         yield c, mock_lk
 
     app.dependency_overrides.pop(get_livekit_client, None)
@@ -81,22 +85,22 @@ def sip_disabled_client():
 # ---------------------------------------------------------------------------
 
 class TestSipAuthGuards:
-    def test_outbound_page_requires_auth(self, client):
-        assert client.get("/sip-outbound").status_code == status.HTTP_401_UNAUTHORIZED
+    def test_outbound_page_requires_auth(self, unauth_client):
+        assert unauth_client.get("/sip-outbound").status_code == status.HTTP_401_UNAUTHORIZED
 
-    def test_inbound_page_requires_auth(self, client):
-        assert client.get("/sip-inbound").status_code == status.HTTP_401_UNAUTHORIZED
+    def test_inbound_page_requires_auth(self, unauth_client):
+        assert unauth_client.get("/sip-inbound").status_code == status.HTTP_401_UNAUTHORIZED
 
-    def test_create_trunk_requires_auth(self, client):
-        r = client.post("/sip-outbound/trunk/create", data={"csrf_token": "x"})
+    def test_create_trunk_requires_auth(self, unauth_client):
+        r = unauth_client.post("/sip-outbound/trunk/create", data={"csrf_token": "x"})
         assert r.status_code == status.HTTP_401_UNAUTHORIZED
 
-    def test_update_trunk_requires_auth(self, client):
-        r = client.post("/sip-outbound/trunk/update", data={"csrf_token": "x", "sip_trunk_id": "ST_x"})
+    def test_update_trunk_requires_auth(self, unauth_client):
+        r = unauth_client.post("/sip-outbound/trunk/update", data={"csrf_token": "x", "sip_trunk_id": "ST_x"})
         assert r.status_code == status.HTTP_401_UNAUTHORIZED
 
-    def test_delete_trunk_requires_auth(self, client):
-        r = client.post("/sip-outbound/trunk/delete", data={"csrf_token": "x", "sip_trunk_id": "ST_x"})
+    def test_delete_trunk_requires_auth(self, unauth_client):
+        r = unauth_client.post("/sip-outbound/trunk/delete", data={"csrf_token": "x", "sip_trunk_id": "ST_x"})
         assert r.status_code == status.HTTP_401_UNAUTHORIZED
 
 
@@ -131,7 +135,7 @@ class TestSipPageLoads:
 class TestOutboundTrunkFormCRUD:
     def test_create_trunk_via_form(self, sip_client):
         c, mock_lk = sip_client
-        token = _csrf_token()
+        token = _csrf_token(c)
         r = c.post(
             "/sip-outbound/trunk/create",
             headers=_auth_headers(),
@@ -154,7 +158,7 @@ class TestOutboundTrunkFormCRUD:
 
     def test_update_trunk_via_form(self, sip_client):
         c, mock_lk = sip_client
-        token = _csrf_token()
+        token = _csrf_token(c)
         r = c.post(
             "/sip-outbound/trunk/update",
             headers=_auth_headers(),
@@ -178,7 +182,7 @@ class TestOutboundTrunkFormCRUD:
 
     def test_delete_trunk(self, sip_client):
         c, mock_lk = sip_client
-        token = _csrf_token()
+        token = _csrf_token(c)
         r = c.post(
             "/sip-outbound/trunk/delete",
             headers=_auth_headers(),
@@ -214,7 +218,7 @@ class TestOutboundTrunkJsonEditor:
     def test_create_trunk_json_overrides_form(self, sip_client):
         """json_data fields take precedence over individual form fields."""
         c, mock_lk = sip_client
-        token = _csrf_token()
+        token = _csrf_token(c)
         json_payload = json.dumps({
             "name": "json-trunk",
             "address": "json.sip.example.com",
@@ -247,7 +251,7 @@ class TestOutboundTrunkJsonEditor:
     def test_update_trunk_json_overrides_form(self, sip_client):
         """json_data fields take precedence over individual form fields on update."""
         c, mock_lk = sip_client
-        token = _csrf_token()
+        token = _csrf_token(c)
         json_payload = json.dumps({
             "name": "json-updated-trunk",
             "address": "updated.json.sip.example.com",
@@ -281,7 +285,7 @@ class TestOutboundTrunkJsonEditor:
     def test_update_trunk_json_headers_preserved(self, sip_client):
         """headers and headers_to_attributes from JSON editor are passed correctly."""
         c, mock_lk = sip_client
-        token = _csrf_token()
+        token = _csrf_token(c)
         json_payload = json.dumps({
             "name": "trunk-with-headers",
             "address": "sip.example.com",
@@ -307,7 +311,7 @@ class TestOutboundTrunkJsonEditor:
     def test_create_trunk_invalid_json_falls_back_to_form(self, sip_client):
         """Invalid json_data is silently ignored; form fields are used."""
         c, mock_lk = sip_client
-        token = _csrf_token()
+        token = _csrf_token(c)
         r = c.post(
             "/sip-outbound/trunk/create",
             headers=_auth_headers(),
@@ -334,7 +338,7 @@ class TestOutboundTrunkJsonEditor:
 class TestInboundTrunkCRUD:
     def test_create_inbound_trunk(self, sip_client):
         c, mock_lk = sip_client
-        token = _csrf_token()
+        token = _csrf_token(c)
         r = c.post(
             "/sip-inbound/trunk/create",
             headers=_auth_headers(),
@@ -351,7 +355,7 @@ class TestInboundTrunkCRUD:
 
     def test_delete_inbound_trunk(self, sip_client):
         c, mock_lk = sip_client
-        token = _csrf_token()
+        token = _csrf_token(c)
         r = c.post(
             "/sip-inbound/trunk/delete",
             headers=_auth_headers(),
@@ -369,7 +373,7 @@ class TestInboundTrunkCRUD:
 class TestInboundTrunkUpdate:
     def test_update_inbound_trunk(self, sip_client):
         c, mock_lk = sip_client
-        token = _csrf_token()
+        token = _csrf_token(c)
         r = c.post(
             "/sip-inbound/trunk/update",
             headers=_auth_headers(),
@@ -391,7 +395,7 @@ class TestInboundTrunkUpdate:
 class TestDispatchRuleCRUD:
     def test_create_dispatch_rule(self, sip_client):
         c, mock_lk = sip_client
-        token = _csrf_token()
+        token = _csrf_token(c)
         r = c.post(
             "/sip-inbound/rule/create",
             headers=_auth_headers(),
@@ -409,7 +413,7 @@ class TestDispatchRuleCRUD:
 
     def test_delete_dispatch_rule(self, sip_client):
         c, mock_lk = sip_client
-        token = _csrf_token()
+        token = _csrf_token(c)
         r = c.post(
             "/sip-inbound/rule/delete",
             headers=_auth_headers(),
@@ -421,7 +425,7 @@ class TestDispatchRuleCRUD:
 
     def test_update_dispatch_rule(self, sip_client):
         c, mock_lk = sip_client
-        token = _csrf_token()
+        token = _csrf_token(c)
         r = c.post(
             "/sip-inbound/rule/update",
             headers=_auth_headers(),

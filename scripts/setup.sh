@@ -58,9 +58,19 @@ ADMIN_PASSWORD=changeme
 
 # Application Settings
 APP_SECRET_KEY=$(openssl rand -hex 32)
+# Encrypts project API secrets at rest. BACK THIS UP — losing it makes every
+# stored project secret unrecoverable.
+APP_ENCRYPTION_KEY=$(openssl rand -base64 32)
 DEBUG=false
 HOST=0.0.0.0
 PORT=8000
+# Set to false when serving over plain HTTP locally.
+SESSION_HTTPS_ONLY=true
+
+# MongoDB (optional). Leave blank to run single-project with no usage history
+# or billing.
+MONGODB_URI=
+MONGODB_DB=livekit_dashboard
 
 # Feature Flags
 ENABLE_SIP=false

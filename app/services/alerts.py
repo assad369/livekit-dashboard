@@ -1,13 +1,21 @@
-"""JSON file-backed alert rules with threshold evaluation against dashboard stats."""
+"""Alert rules with threshold evaluation against dashboard stats.
 
-import json
+Backed by MongoDB when configured, otherwise a JSON file (see
+`app.services.store`). Rules are scoped per project. The evaluation logic
+below is pure and unchanged — only the persistence moved.
+"""
+
 import os
 import uuid
 from dataclasses import dataclass, asdict
 from typing import Optional
 
+from app.services import store
+
 
 _STORE_PATH = os.environ.get("ALERT_RULES_FILE", "/tmp/alert_rules.json")
+
+COLLECTION = "alert_rules"
 
 METRICS: dict[str, str] = {
     "rooms_total": "Total Rooms",
@@ -59,35 +67,55 @@ class AlertRule:
 
 
 def _load() -> list:
-    try:
-        with open(_STORE_PATH) as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return []
+    return store.read_json(_STORE_PATH, [])
 
 
 def _save(rules: list) -> None:
-    with open(_STORE_PATH, "w") as f:
-        json.dump(rules, f, indent=2)
+    store.write_json(_STORE_PATH, rules)
 
 
-def list_rules() -> list[AlertRule]:
-    return [AlertRule(**r) for r in _load()]
+def _from_doc(doc: dict) -> "AlertRule":
+    return AlertRule(
+        id=str(doc["_id"]),
+        name=doc.get("name", ""),
+        metric=doc.get("metric", ""),
+        operator=doc.get("operator", ">"),
+        threshold=float(doc.get("threshold", 0)),
+        severity=doc.get("severity", "warning"),
+        enabled=bool(doc.get("enabled", True)),
+    )
 
 
-def get_rule(rule_id: str) -> Optional[AlertRule]:
-    for r in _load():
-        if r["id"] == rule_id:
-            return AlertRule(**r)
-    return None
+async def list_rules(project_id: Optional[str] = None) -> list[AlertRule]:
+    collection = store.collection(COLLECTION)
+    if collection is None:
+        return [AlertRule(**r) for r in _load()]
+
+    cursor = collection.find({"project_id": store.scope(project_id)})
+    return [_from_doc(doc) async for doc in cursor]
 
 
-def create_rule(
+async def get_rule(rule_id: str, project_id: Optional[str] = None) -> Optional[AlertRule]:
+    collection = store.collection(COLLECTION)
+    if collection is None:
+        for r in _load():
+            if r["id"] == rule_id:
+                return AlertRule(**r)
+        return None
+
+    doc = await collection.find_one(
+        {"_id": rule_id, "project_id": store.scope(project_id)}
+    )
+    return _from_doc(doc) if doc else None
+
+
+async def create_rule(
     name: str,
     metric: str,
     operator: str,
     threshold: float,
     severity: str = "warning",
+    project_id: Optional[str] = None,
 ) -> AlertRule:
     if metric not in METRICS:
         raise ValueError(f"Unknown metric: {metric!r}")
@@ -96,7 +124,6 @@ def create_rule(
     if severity not in SEVERITIES:
         raise ValueError(f"Unknown severity: {severity!r}")
 
-    rules = _load()
     rule = AlertRule(
         id=str(uuid.uuid4())[:8],
         name=name.strip(),
@@ -106,31 +133,62 @@ def create_rule(
         severity=severity,
         enabled=True,
     )
-    rules.append(rule.as_dict())
-    _save(rules)
+
+    collection = store.collection(COLLECTION)
+    if collection is None:
+        rules = _load()
+        rules.append(rule.as_dict())
+        _save(rules)
+        return rule
+
+    doc = rule.as_dict()
+    doc["_id"] = doc.pop("id")
+    doc["project_id"] = store.scope(project_id)
+    await collection.insert_one(doc)
     return rule
 
 
-def delete_rule(rule_id: str) -> bool:
-    rules = _load()
-    new_rules = [r for r in rules if r["id"] != rule_id]
-    if len(new_rules) == len(rules):
-        return False
-    _save(new_rules)
-    return True
+async def delete_rule(rule_id: str, project_id: Optional[str] = None) -> bool:
+    collection = store.collection(COLLECTION)
+    if collection is None:
+        rules = _load()
+        remaining = [r for r in rules if r["id"] != rule_id]
+        if len(remaining) == len(rules):
+            return False
+        _save(remaining)
+        return True
+
+    result = await collection.delete_one(
+        {"_id": rule_id, "project_id": store.scope(project_id)}
+    )
+    return result.deleted_count == 1
 
 
-def toggle_rule(rule_id: str) -> Optional[bool]:
+async def toggle_rule(rule_id: str, project_id: Optional[str] = None) -> Optional[bool]:
     """Flip enabled/disabled. Returns new enabled state, or None if not found."""
-    rules = _load()
-    for r in rules:
-        if r["id"] == rule_id:
-            r["enabled"] = not r.get("enabled", True)
-            _save(rules)
-            return r["enabled"]
-    return None
+    collection = store.collection(COLLECTION)
+    if collection is None:
+        rules = _load()
+        for r in rules:
+            if r["id"] == rule_id:
+                r["enabled"] = not r.get("enabled", True)
+                _save(rules)
+                return r["enabled"]
+        return None
+
+    doc = await collection.find_one(
+        {"_id": rule_id, "project_id": store.scope(project_id)}
+    )
+    if doc is None:
+        return None
+    enabled = not doc.get("enabled", True)
+    await collection.update_one({"_id": rule_id}, {"$set": {"enabled": enabled}})
+    return enabled
 
 
-def evaluate_all(stats) -> list[tuple[AlertRule, bool]]:
+async def evaluate_all(
+    stats, project_id: Optional[str] = None
+) -> list[tuple[AlertRule, bool]]:
     """Return (rule, triggered) pairs for every rule against current *stats*."""
-    return [(rule, rule.evaluate(stats)) for rule in list_rules()]
+    rules = await list_rules(project_id)
+    return [(rule, rule.evaluate(stats)) for rule in rules]

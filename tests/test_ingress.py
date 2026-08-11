@@ -5,6 +5,8 @@ import pytest
 from fastapi import status
 from fastapi.testclient import TestClient
 
+from tests.conftest import log_in
+
 
 def _auth_headers():
     import base64
@@ -12,9 +14,9 @@ def _auth_headers():
     return {"Authorization": f"Basic {base64.b64encode(creds.encode()).decode()}"}
 
 
-def _csrf_token():
-    from app.security.csrf import generate_csrf_token
-    return generate_csrf_token()
+def _csrf_token(c):
+    from tests.conftest import csrf_for
+    return csrf_for(c)
 
 
 def _make_mock_lk():
@@ -36,25 +38,26 @@ def ingress_client():
     app.dependency_overrides[get_livekit_client] = lambda: mock_lk
 
     with TestClient(app, raise_server_exceptions=False) as c:
+        log_in(c)
         yield c, mock_lk
 
     app.dependency_overrides.pop(get_livekit_client, None)
 
 
 class TestIngressAuthGuards:
-    def test_ingress_page_requires_auth(self, client):
-        assert client.get("/ingress").status_code == status.HTTP_401_UNAUTHORIZED
+    def test_ingress_page_requires_auth(self, unauth_client):
+        assert unauth_client.get("/ingress").status_code == status.HTTP_401_UNAUTHORIZED
 
-    def test_create_ingress_requires_auth(self, client):
-        r = client.post("/ingress/create", data={"csrf_token": "x"})
+    def test_create_ingress_requires_auth(self, unauth_client):
+        r = unauth_client.post("/ingress/create", data={"csrf_token": "x"})
         assert r.status_code == status.HTTP_401_UNAUTHORIZED
 
-    def test_update_ingress_requires_auth(self, client):
-        r = client.post("/ingress/update", data={"csrf_token": "x", "ingress_id": "IN_x"})
+    def test_update_ingress_requires_auth(self, unauth_client):
+        r = unauth_client.post("/ingress/update", data={"csrf_token": "x", "ingress_id": "IN_x"})
         assert r.status_code == status.HTTP_401_UNAUTHORIZED
 
-    def test_delete_ingress_requires_auth(self, client):
-        r = client.post("/ingress/delete", data={"csrf_token": "x", "ingress_id": "IN_x"})
+    def test_delete_ingress_requires_auth(self, unauth_client):
+        r = unauth_client.post("/ingress/delete", data={"csrf_token": "x", "ingress_id": "IN_x"})
         assert r.status_code == status.HTTP_401_UNAUTHORIZED
 
 
@@ -69,7 +72,7 @@ class TestIngressPageLoad:
 class TestIngressCRUD:
     def test_create_ingress_rtmp(self, ingress_client):
         c, mock_lk = ingress_client
-        token = _csrf_token()
+        token = _csrf_token(c)
         r = c.post(
             "/ingress/create",
             headers=_auth_headers(),
@@ -92,7 +95,7 @@ class TestIngressCRUD:
 
     def test_create_ingress_whip(self, ingress_client):
         c, mock_lk = ingress_client
-        token = _csrf_token()
+        token = _csrf_token(c)
         r = c.post(
             "/ingress/create",
             headers=_auth_headers(),
@@ -126,7 +129,7 @@ class TestIngressCRUD:
 
     def test_update_ingress(self, ingress_client):
         c, mock_lk = ingress_client
-        token = _csrf_token()
+        token = _csrf_token(c)
         r = c.post(
             "/ingress/update",
             headers=_auth_headers(),
@@ -146,7 +149,7 @@ class TestIngressCRUD:
 
     def test_delete_ingress(self, ingress_client):
         c, mock_lk = ingress_client
-        token = _csrf_token()
+        token = _csrf_token(c)
         r = c.post(
             "/ingress/delete",
             headers=_auth_headers(),

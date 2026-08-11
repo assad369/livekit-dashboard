@@ -118,6 +118,18 @@
                     Settings
                 </a>
             </div>
+
+            <div class="nav-section">
+                <div class="nav-section-title">Account</div>
+                <a href="/projects" class="nav-link {% if '/projects' in request.url.path %}active{% endif %}">
+                    <i class="bi bi-diagram-3"></i>
+                    Projects
+                </a>
+                <a href="/billing" class="nav-link {% if '/billing' in request.url.path %}active{% endif %}">
+                    <i class="bi bi-cash-coin"></i>
+                    Billing
+                </a>
+            </div>
         </nav>
     </aside>
 
@@ -151,6 +163,7 @@
                 </div>
             </form>
             <div class="top-bar-actions">
+                {% include "partials/project_switcher.html.j2" %}
                 {% if is_readonly() %}
                 <span class="badge bg-secondary" title="Dashboard is in read-only mode">
                     <i class="bi bi-lock me-1"></i>Read-only
@@ -163,10 +176,14 @@
                     <i class="bi bi-person-circle"></i>
                     <span>{{ current_user or 'admin' }}</span>
                 </div>
-                <a href="/logout" class="btn btn-secondary btn-sm">
-                    <i class="bi bi-box-arrow-right"></i>
-                    Logout
-                </a>
+                {# POST, so another site cannot sign the operator out with a link or an <img>. #}
+                <form method="post" action="/logout" class="d-inline">
+                    <input type="hidden" name="csrf_token" value="{{ request.state.csrf_token }}">
+                    <button type="submit" class="btn btn-secondary btn-sm">
+                        <i class="bi bi-box-arrow-right"></i>
+                        Logout
+                    </button>
+                </form>
             </div>
         </div>
 

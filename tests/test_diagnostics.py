@@ -4,9 +4,9 @@ import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 
-def _csrf():
-    from app.security.csrf import generate_csrf_token
-    return generate_csrf_token()
+def _csrf(client):
+    from tests.conftest import csrf_for
+    return csrf_for(client)
 
 
 def _make_lk():
@@ -21,8 +21,8 @@ def _make_lk():
 # Route tests
 # ---------------------------------------------------------------------------
 
-def test_diagnostics_page_requires_auth(client):
-    resp = client.get("/diagnostics", follow_redirects=False)
+def test_diagnostics_page_requires_auth(unauth_client):
+    resp = unauth_client.get("/diagnostics", follow_redirects=False)
     assert resp.status_code == 401
 
 
@@ -32,8 +32,8 @@ def test_diagnostics_page_returns_200(client, auth_headers):
     assert b"Diagnostics" in resp.content
 
 
-def test_support_bundle_requires_auth(client):
-    resp = client.get("/diagnostics/rooms/my-room/bundle.json", follow_redirects=False)
+def test_support_bundle_requires_auth(unauth_client):
+    resp = unauth_client.get("/diagnostics/rooms/my-room/bundle.json", follow_redirects=False)
     assert resp.status_code == 401
 
 
@@ -55,8 +55,8 @@ def test_support_bundle_returns_json(client, auth_headers):
     assert "annotations" in data
 
 
-def test_webhook_test_requires_auth(client):
-    resp = client.post(
+def test_webhook_test_requires_auth(unauth_client):
+    resp = unauth_client.post(
         "/diagnostics/webhook-test",
         data={"csrf_token": "x", "url": "http://example.com", "payload": "{}"},
         follow_redirects=False,
@@ -69,7 +69,7 @@ def test_webhook_test_connection_error(client, auth_headers):
     resp = client.post(
         "/diagnostics/webhook-test",
         data={
-            "csrf_token": _csrf(),
+            "csrf_token": _csrf(client),
             "url": "http://127.0.0.1:19999/no-such-endpoint",
             "payload": '{"event": "test"}',
         },

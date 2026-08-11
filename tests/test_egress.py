@@ -5,6 +5,8 @@ import pytest
 from fastapi import status
 from fastapi.testclient import TestClient
 
+from tests.conftest import log_in
+
 
 def _auth_headers():
     import base64
@@ -12,9 +14,9 @@ def _auth_headers():
     return {"Authorization": f"Basic {base64.b64encode(creds.encode()).decode()}"}
 
 
-def _csrf_token():
-    from app.security.csrf import generate_csrf_token
-    return generate_csrf_token()
+def _csrf_token(c):
+    from tests.conftest import csrf_for
+    return csrf_for(c)
 
 
 def _make_mock_lk():
@@ -37,25 +39,26 @@ def egress_client():
     app.dependency_overrides[get_livekit_client] = lambda: mock_lk
 
     with TestClient(app, raise_server_exceptions=False) as c:
+        log_in(c)
         yield c, mock_lk
 
     app.dependency_overrides.pop(get_livekit_client, None)
 
 
 class TestEgressAuthGuards:
-    def test_track_egress_requires_auth(self, client):
-        r = client.post("/egress/start/track", data={"csrf_token": "x"})
+    def test_track_egress_requires_auth(self, unauth_client):
+        r = unauth_client.post("/egress/start/track", data={"csrf_token": "x"})
         assert r.status_code == status.HTTP_401_UNAUTHORIZED
 
-    def test_web_egress_requires_auth(self, client):
-        r = client.post("/egress/start/web", data={"csrf_token": "x"})
+    def test_web_egress_requires_auth(self, unauth_client):
+        r = unauth_client.post("/egress/start/web", data={"csrf_token": "x"})
         assert r.status_code == status.HTTP_401_UNAUTHORIZED
 
 
 class TestEgressTypes:
     def test_start_room_composite_egress(self, egress_client):
         c, mock_lk = egress_client
-        token = _csrf_token()
+        token = _csrf_token(c)
         r = c.post(
             "/egress/start",
             headers=_auth_headers(),
@@ -72,7 +75,7 @@ class TestEgressTypes:
 
     def test_start_track_egress(self, egress_client):
         c, mock_lk = egress_client
-        token = _csrf_token()
+        token = _csrf_token(c)
         r = c.post(
             "/egress/start/track",
             headers=_auth_headers(),
@@ -92,7 +95,7 @@ class TestEgressTypes:
 
     def test_start_web_egress(self, egress_client):
         c, mock_lk = egress_client
-        token = _csrf_token()
+        token = _csrf_token(c)
         r = c.post(
             "/egress/start/web",
             headers=_auth_headers(),
@@ -110,7 +113,7 @@ class TestEgressTypes:
 
     def test_stop_egress(self, egress_client):
         c, mock_lk = egress_client
-        token = _csrf_token()
+        token = _csrf_token(c)
         r = c.post(
             "/egress/EG_abc123/stop",
             headers=_auth_headers(),

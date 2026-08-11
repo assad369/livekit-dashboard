@@ -1,0 +1,215 @@
+{% extends "base.html.j2" %}
+
+{% block title %}Projects — LiveKit Dashboard{% endblock %}
+{% block page_title %}Projects{% endblock %}
+{% block page_subtitle %}
+<p class="text-muted mb-0">Each project is one LiveKit deployment with its own credentials</p>
+{% endblock %}
+
+{% block content %}
+<div class="container-fluid px-4 py-4">
+
+  {% if not storage_available %}
+  <div class="alert alert-warning">
+    <i class="bi bi-database-exclamation me-1"></i>
+    <strong>Storage unavailable.</strong>
+    {% if db_health.error %}{{ db_health.error }}{% else %}
+    Set <code>MONGODB_URI</code> to store multiple projects.
+    {% endif %}
+    {% if env_project %}
+    The dashboard is running against the <code>LIVEKIT_*</code> environment variables.
+    {% endif %}
+  </div>
+  {% endif %}
+
+  {% if can_import_env %}
+  <div class="alert alert-info d-flex justify-content-between align-items-center">
+    <div>
+      <i class="bi bi-box-arrow-in-down me-1"></i>
+      Import your existing <code>LIVEKIT_*</code> environment settings as the first project.
+    </div>
+    <form method="post" action="/projects/import-env" class="mb-0">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button class="btn btn-sm btn-primary" {% if is_readonly() %}disabled{% endif %}>
+        Import from environment
+      </button>
+    </form>
+  </div>
+  {% endif %}
+
+  <div class="card mb-4">
+    <div class="card-header"><h6 class="mb-0">Configured projects</h6></div>
+    <div class="table-responsive">
+      <table class="table table-hover align-middle mb-0">
+        <thead>
+          <tr>
+            <th>Name</th>
+            <th>LiveKit URL</th>
+            <th>API key</th>
+            <th>SIP</th>
+            <th>Metrics</th>
+            <th class="text-end">Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+        {% for project in projects %}
+          <tr>
+            <td>
+              <strong>{{ project.name }}</strong>
+              {% if project.is_default %}<span class="badge bg-primary ms-1">default</span>{% endif %}
+              {% if project.source == 'env' %}<span class="badge bg-secondary ms-1">from env</span>{% endif %}
+              <div class="text-muted small">{{ project.slug }}</div>
+            </td>
+            <td><code class="small">{{ project.livekit_url }}</code></td>
+            <td><code class="small">{{ project.masked_key() }}</code></td>
+            <td>
+              {% if project.sip_enabled %}
+                <i class="bi bi-check-circle text-success"></i>
+              {% else %}
+                <span class="text-muted">—</span>
+              {% endif %}
+            </td>
+            <td>
+              {% if project.prometheus_url %}
+                <i class="bi bi-check-circle text-success" title="{{ project.prometheus_url }}"></i>
+              {% else %}
+                <span class="text-muted" title="Bandwidth will not be measured">—</span>
+              {% endif %}
+            </td>
+            <td class="text-end">
+              <div class="d-flex gap-1 justify-content-end align-items-center">
+                <span id="test-result-{{ project.id }}"></span>
+                <button class="btn btn-sm btn-outline-secondary"
+                        hx-post="/projects/{{ project.id }}/test"
+                        hx-target="#test-result-{{ project.id }}"
+                        hx-swap="innerHTML">
+                  Test
+                </button>
+                {% if project.source == 'mongo' and not is_readonly() %}
+                  <a href="/projects/{{ project.id }}/edit" class="btn btn-sm btn-outline-primary">Edit</a>
+                  {% if not project.is_default %}
+                  <form method="post" action="/projects/{{ project.id }}/default" class="d-inline mb-0">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                    <button class="btn btn-sm btn-outline-secondary">Make default</button>
+                  </form>
+                  {% endif %}
+                  <button class="btn btn-sm btn-outline-danger"
+                          data-bs-toggle="modal"
+                          data-bs-target="#delete-{{ project.id }}">Delete</button>
+                {% endif %}
+              </div>
+            </td>
+          </tr>
+        {% else %}
+          <tr><td colspan="6">
+            {% include "partials/_empty_state.html.j2" %}
+          </td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  {% for project in projects if project.source == 'mongo' %}
+  <div class="modal fade" id="delete-{{ project.id }}" tabindex="-1">
+    <div class="modal-dialog">
+      <div class="modal-content">
+        <form method="post" action="/projects/{{ project.id }}/delete">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <div class="modal-header">
+            <h5 class="modal-title">Delete {{ project.name }}?</h5>
+            <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+          </div>
+          <div class="modal-body">
+            <p>Type <strong>{{ project.name }}</strong> to confirm.</p>
+            <input type="text" name="confirm_name" class="form-control mb-3"
+                   placeholder="{{ project.name }}" autocomplete="off" required>
+            <div class="form-check">
+              <input class="form-check-input" type="checkbox" name="purge_data"
+                     id="purge-{{ project.id }}">
+              <label class="form-check-label" for="purge-{{ project.id }}">
+                Also delete this project's usage history, alerts and audit log.
+                <span class="text-danger">This cannot be undone.</span>
+              </label>
+            </div>
+          </div>
+          <div class="modal-footer">
+            <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+            <button type="submit" class="btn btn-danger">Delete project</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+  {% endfor %}
+
+  {% if storage_available and not is_readonly() %}
+  <div class="card">
+    <div class="card-header"><h6 class="mb-0">Add a project</h6></div>
+    <div class="card-body">
+      <form method="post" action="/projects" class="row g-3">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <div class="col-md-4">
+          <label class="form-label small">Name</label>
+          <input type="text" name="name" class="form-control form-control-sm"
+                 placeholder="Production" required>
+        </div>
+        <div class="col-md-8">
+          <label class="form-label small">LiveKit URL</label>
+          <input type="text" name="livekit_url" class="form-control form-control-sm"
+                 placeholder="wss://livekit.example.com" required>
+        </div>
+        <div class="col-md-6">
+          <label class="form-label small">API key</label>
+          <input type="text" name="api_key" class="form-control form-control-sm"
+                 autocomplete="off" required>
+        </div>
+        <div class="col-md-6">
+          <label class="form-label small">API secret</label>
+          <input type="password" name="api_secret" class="form-control form-control-sm"
+                 autocomplete="new-password" required>
+          <div class="form-text">Encrypted before it is stored.</div>
+        </div>
+        <div class="col-md-8">
+          <label class="form-label small">Prometheus metrics URL <span class="text-muted">(optional)</span></label>
+          <input type="text" name="prometheus_url" class="form-control form-control-sm"
+                 placeholder="http://livekit.example.com:6789/metrics">
+          <div class="form-text">
+            Needed to measure bandwidth for cost estimates. Without it, bandwidth is reported as not measured.
+          </div>
+        </div>
+        <div class="col-md-4 d-flex align-items-end">
+          <div class="form-check">
+            <input class="form-check-input" type="checkbox" name="sip_enabled" id="sip_enabled">
+            <label class="form-check-label" for="sip_enabled">SIP enabled</label>
+          </div>
+        </div>
+        <div class="col-12">
+          <button type="submit" class="btn btn-primary btn-sm">Add project</button>
+        </div>
+      </form>
+    </div>
+  </div>
+  {% endif %}
+
+  <div class="card mt-4">
+    <div class="card-header"><h6 class="mb-0">LiveKit server configuration</h6></div>
+    <div class="card-body">
+      <p class="text-muted small mb-2">
+        Add this to each LiveKit server's <code>config.yaml</code> so the dashboard receives
+        usage events and can measure bandwidth. Use that project's own API key.
+      </p>
+<pre class="bg-body-tertiary p-3 rounded small mb-0"><code>webhook:
+  api_key: &lt;this project's API key&gt;
+  urls:
+    - {{ webhook_url }}
+
+prometheus_port: 6789</code></pre>
+      <p class="text-muted small mt-2 mb-0">
+        Keep the metrics port reachable from this dashboard but not from the public internet.
+      </p>
+    </div>
+  </div>
+
+</div>
+{% endblock %}

@@ -5,9 +5,9 @@ from dataclasses import dataclass
 from unittest.mock import AsyncMock, patch
 
 
-def _csrf():
-    from app.security.csrf import generate_csrf_token
-    return generate_csrf_token()
+def _csrf(client):
+    from tests.conftest import csrf_for
+    return csrf_for(client)
 
 
 # ---------------------------------------------------------------------------
@@ -29,74 +29,74 @@ class _Stats:
 # Service tests
 # ---------------------------------------------------------------------------
 
-def test_list_rules_empty(tmp_path):
+async def test_list_rules_empty(tmp_path):
     import app.services.alerts as al
     with patch.object(al, "_STORE_PATH", str(tmp_path / "alerts.json")):
-        assert al.list_rules() == []
+        assert await al.list_rules() == []
 
 
-def test_create_rule_basic(tmp_path):
+async def test_create_rule_basic(tmp_path):
     import app.services.alerts as al
     with patch.object(al, "_STORE_PATH", str(tmp_path / "alerts.json")):
-        rule = al.create_rule(name="High rooms", metric="rooms_total", operator=">", threshold=50)
+        rule = await al.create_rule(name="High rooms", metric="rooms_total", operator=">", threshold=50)
     assert rule.name == "High rooms"
     assert rule.metric == "rooms_total"
     assert rule.threshold == 50.0
     assert rule.enabled is True
 
 
-def test_create_rule_invalid_metric(tmp_path):
+async def test_create_rule_invalid_metric(tmp_path):
     import app.services.alerts as al
     with patch.object(al, "_STORE_PATH", str(tmp_path / "alerts.json")):
         with pytest.raises(ValueError):
-            al.create_rule(name="bad", metric="nonexistent", operator=">", threshold=1)
+            await al.create_rule(name="bad", metric="nonexistent", operator=">", threshold=1)
 
 
-def test_create_rule_invalid_operator(tmp_path):
+async def test_create_rule_invalid_operator(tmp_path):
     import app.services.alerts as al
     with patch.object(al, "_STORE_PATH", str(tmp_path / "alerts.json")):
         with pytest.raises(ValueError):
-            al.create_rule(name="bad", metric="rooms_total", operator="!=", threshold=1)
+            await al.create_rule(name="bad", metric="rooms_total", operator="!=", threshold=1)
 
 
-def test_create_rule_invalid_severity(tmp_path):
+async def test_create_rule_invalid_severity(tmp_path):
     import app.services.alerts as al
     with patch.object(al, "_STORE_PATH", str(tmp_path / "alerts.json")):
         with pytest.raises(ValueError):
-            al.create_rule(name="bad", metric="rooms_total", operator=">", threshold=1, severity="info")
+            await al.create_rule(name="bad", metric="rooms_total", operator=">", threshold=1, severity="info")
 
 
-def test_delete_rule(tmp_path):
+async def test_delete_rule(tmp_path):
     import app.services.alerts as al
     with patch.object(al, "_STORE_PATH", str(tmp_path / "alerts.json")):
-        rule = al.create_rule(name="Delete me", metric="rooms_total", operator=">", threshold=0)
-        result = al.delete_rule(rule.id)
-        remaining = al.list_rules()
+        rule = await al.create_rule(name="Delete me", metric="rooms_total", operator=">", threshold=0)
+        result = await al.delete_rule(rule.id)
+        remaining = await al.list_rules()
     assert result is True
     assert remaining == []
 
 
-def test_delete_rule_not_found(tmp_path):
+async def test_delete_rule_not_found(tmp_path):
     import app.services.alerts as al
     with patch.object(al, "_STORE_PATH", str(tmp_path / "alerts.json")):
-        assert al.delete_rule("bad-id") is False
+        assert await al.delete_rule("bad-id") is False
 
 
-def test_toggle_rule(tmp_path):
+async def test_toggle_rule(tmp_path):
     import app.services.alerts as al
     with patch.object(al, "_STORE_PATH", str(tmp_path / "alerts.json")):
-        rule = al.create_rule(name="Toggle", metric="rooms_total", operator=">", threshold=0)
+        rule = await al.create_rule(name="Toggle", metric="rooms_total", operator=">", threshold=0)
         assert rule.enabled is True
-        new_state = al.toggle_rule(rule.id)
+        new_state = await al.toggle_rule(rule.id)
         assert new_state is False
-        toggled_back = al.toggle_rule(rule.id)
+        toggled_back = await al.toggle_rule(rule.id)
         assert toggled_back is True
 
 
-def test_toggle_rule_not_found(tmp_path):
+async def test_toggle_rule_not_found(tmp_path):
     import app.services.alerts as al
     with patch.object(al, "_STORE_PATH", str(tmp_path / "alerts.json")):
-        assert al.toggle_rule("nonexistent") is None
+        assert await al.toggle_rule("nonexistent") is None
 
 
 @pytest.mark.parametrize("op,value,threshold,expected", [
@@ -125,13 +125,13 @@ def test_rule_evaluate_unknown_metric():
     assert rule.evaluate(_Stats()) is False
 
 
-def test_evaluate_all(tmp_path):
+async def test_evaluate_all(tmp_path):
     import app.services.alerts as al
     with patch.object(al, "_STORE_PATH", str(tmp_path / "alerts.json")):
-        al.create_rule(name="High latency", metric="api_latency_ms", operator=">", threshold=100)
-        al.create_rule(name="No rooms", metric="rooms_total", operator=">", threshold=0)
+        await al.create_rule(name="High latency", metric="api_latency_ms", operator=">", threshold=100)
+        await al.create_rule(name="No rooms", metric="rooms_total", operator=">", threshold=0)
         stats = _Stats(api_latency_ms=200.0, rooms_total=0)
-        results = al.evaluate_all(stats)
+        results = await al.evaluate_all(stats)
     triggered = {r.name: t for r, t in results}
     assert triggered["High latency"] is True
     assert triggered["No rooms"] is False
@@ -141,8 +141,8 @@ def test_evaluate_all(tmp_path):
 # Route tests
 # ---------------------------------------------------------------------------
 
-def test_alerts_page_requires_auth(client):
-    resp = client.get("/alerts", follow_redirects=False)
+def test_alerts_page_requires_auth(unauth_client):
+    resp = unauth_client.get("/alerts", follow_redirects=False)
     assert resp.status_code == 401
 
 
@@ -166,7 +166,7 @@ def test_create_alert_via_route(client, auth_headers, tmp_path):
         resp = client.post(
             "/alerts",
             data={
-                "csrf_token": _csrf(),
+                "csrf_token": _csrf(client),
                 "name": "Test alert",
                 "metric": "rooms_total",
                 "operator": ">",
@@ -179,29 +179,29 @@ def test_create_alert_via_route(client, auth_headers, tmp_path):
     assert resp.status_code == 303
 
 
-def test_delete_alert_via_route(client, auth_headers, tmp_path):
+async def test_delete_alert_via_route(client, auth_headers, tmp_path):
     import app.services.alerts as al
     from app.services.dashboard import DashboardStats
 
     with patch.object(al, "_STORE_PATH", str(tmp_path / "alerts.json")):
-        rule = al.create_rule(name="Delete route", metric="rooms_total", operator=">", threshold=0)
+        rule = await al.create_rule(name="Delete route", metric="rooms_total", operator=">", threshold=0)
         resp = client.post(
             f"/alerts/{rule.id}/delete",
-            data={"csrf_token": _csrf()},
+            data={"csrf_token": _csrf(client)},
             headers=auth_headers,
             follow_redirects=False,
         )
     assert resp.status_code == 303
 
 
-def test_toggle_alert_via_route(client, auth_headers, tmp_path):
+async def test_toggle_alert_via_route(client, auth_headers, tmp_path):
     import app.services.alerts as al
 
     with patch.object(al, "_STORE_PATH", str(tmp_path / "alerts.json")):
-        rule = al.create_rule(name="Toggle route", metric="rooms_total", operator=">", threshold=0)
+        rule = await al.create_rule(name="Toggle route", metric="rooms_total", operator=">", threshold=0)
         resp = client.post(
             f"/alerts/{rule.id}/toggle",
-            data={"csrf_token": _csrf()},
+            data={"csrf_token": _csrf(client)},
             headers=auth_headers,
             follow_redirects=False,
         )

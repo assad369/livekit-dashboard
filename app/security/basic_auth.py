@@ -1,55 +1,37 @@
-"""HTTP Basic Authentication"""
+"""Route-level authentication helpers.
 
-import os
-import secrets
+Historically this implemented HTTP Basic against ADMIN_USERNAME/ADMIN_PASSWORD
+with a plaintext comparison. Authentication now happens in
+`app.security.session_auth.AuthMiddleware` against a signed session cookie,
+and these two functions simply read what it recorded.
+
+The module keeps its old name and exports so the ~60 existing
+`dependencies=[Depends(requires_admin)]` declarations and `get_current_user`
+calls across the route modules continue to work unchanged. They are now a
+cheap second check behind the middleware rather than the only gate.
+"""
+
 from typing import Optional
 
-from fastapi import Depends, HTTPException, status, Request
-from fastapi.security import HTTPBasic, HTTPBasicCredentials
+from fastapi import HTTPException, Request, status
 
 
-security = HTTPBasic()
+def requires_admin(request: Request) -> str:
+    """Dependency that requires an authenticated session.
 
-
-def verify_credentials(credentials: HTTPBasicCredentials) -> bool:
-    """Verify username and password against environment variables"""
-    correct_username = os.environ.get("ADMIN_USERNAME", "admin")
-    correct_password = os.environ.get("ADMIN_PASSWORD", "changeme")
-
-    # Use constant-time comparison to prevent timing attacks
-    username_correct = secrets.compare_digest(
-        credentials.username.encode("utf8"), correct_username.encode("utf8")
-    )
-    password_correct = secrets.compare_digest(
-        credentials.password.encode("utf8"), correct_password.encode("utf8")
-    )
-
-    return username_correct and password_correct
-
-
-def requires_admin(credentials: HTTPBasicCredentials = Depends(security)) -> str:
-    """Dependency that requires admin authentication"""
-    if not verify_credentials(credentials):
+    The middleware normally rejects the request before a route is reached;
+    this catches the case where a route is somehow served without it.
+    """
+    user = request.scope.get("state", {}).get("user")
+    if not user:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid credentials",
-            headers={"WWW-Authenticate": "Basic"},
+            detail="Authentication required",
         )
-    return credentials.username
+    return user.get("username", "")
 
 
 def get_current_user(request: Request) -> Optional[str]:
-    """Get current authenticated user from request if available"""
-    # Try to extract from Authorization header
-    auth_header = request.headers.get("Authorization", "")
-    if auth_header.startswith("Basic "):
-        try:
-            import base64
-
-            encoded = auth_header.replace("Basic ", "")
-            decoded = base64.b64decode(encoded).decode("utf-8")
-            username, _ = decoded.split(":", 1)
-            return username
-        except Exception:
-            pass
-    return None
+    """Return the authenticated username, or None."""
+    user = request.scope.get("state", {}).get("user")
+    return user.get("username") if user else None

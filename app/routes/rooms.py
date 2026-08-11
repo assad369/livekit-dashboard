@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, Request, Form
 from fastapi.responses import HTMLResponse, RedirectResponse, Response, StreamingResponse
 from typing import List, Optional
 
+from app.services import store
 from app.services.livekit import LiveKitClient, get_livekit_client
 from app.services import room_annotations as annotations
 from app.services import audit_log
@@ -41,8 +42,8 @@ async def rooms_index(
         rooms = [r for r in rooms if search.lower() in r.name.lower()]
 
     current_user = get_current_user(request)
-    pinned_names = annotations.get_pinned()
-    all_annotations = annotations.get_all_annotations()
+    pinned_names = await annotations.get_pinned(project_id=store.request_project_id(request))
+    all_annotations = await annotations.get_all_annotations(project_id=store.request_project_id(request))
 
     def _annotate(room):
         # Protobuf objects forbid arbitrary attribute assignment, so we wrap
@@ -104,7 +105,7 @@ async def create_room(
             empty_timeout=empty_timeout,
             metadata=metadata,
         )
-        audit_log.log_action("room.create", name, user=get_current_user(request) or "admin",
+        await audit_log.log_action("room.create", name, user=get_current_user(request) or "admin",
                              details={"max_participants": max_participants})
 
         # Check if HTMX request
@@ -188,7 +189,7 @@ async def room_detail(
 
     participants = await lk.list_participants(room_name)
     current_user = get_current_user(request)
-    room_annotations = annotations.get_annotations(room_name)
+    room_annotations = await annotations.get_annotations(room_name, project_id=store.request_project_id(request))
     timeline = annotations.build_timeline(room, participants)
 
     template_data = {
@@ -244,7 +245,7 @@ async def delete_room(
     
     try:
         await lk.delete_room(room_name)
-        audit_log.log_action("room.delete", room_name, user=get_current_user(request) or "admin")
+        await audit_log.log_action("room.delete", room_name, user=get_current_user(request) or "admin")
     except Exception as e:
         logger.warning("Error deleting room: %s", e)
 
@@ -323,7 +324,7 @@ async def kick_participant(
 
     try:
         await lk.remove_participant(room_name, identity)
-        audit_log.log_action("participant.kick", identity, user=get_current_user(request) or "admin",
+        await audit_log.log_action("participant.kick", identity, user=get_current_user(request) or "admin",
                              details={"room": room_name})
     except Exception as e:
         logger.warning("Error kicking participant: %s", e)
@@ -350,7 +351,7 @@ async def mute_participant(
     try:
         await lk.mute_participant_track(room_name, identity, track_sid, muted)
         action = "participant.mute" if muted else "participant.unmute"
-        audit_log.log_action(action, identity, user=get_current_user(request) or "admin",
+        await audit_log.log_action(action, identity, user=get_current_user(request) or "admin",
                              details={"room": room_name, "track_sid": track_sid})
     except Exception as e:
         logger.warning("Error muting participant: %s", e)
@@ -387,8 +388,8 @@ async def pin_room(
 ):
     """Pin a room for quick access"""
     await verify_csrf_token(request)
-    annotations.pin_room(room_name)
-    audit_log.log_action("room.pin", room_name, user=get_current_user(request) or "admin")
+    await annotations.pin_room(room_name, project_id=store.request_project_id(request))
+    await audit_log.log_action("room.pin", room_name, user=get_current_user(request) or "admin")
     if request.headers.get("HX-Request"):
         return Response(content="", status_code=204)
     return RedirectResponse(url="/rooms", status_code=303)
@@ -402,8 +403,8 @@ async def unpin_room(
 ):
     """Unpin a room"""
     await verify_csrf_token(request)
-    annotations.unpin_room(room_name)
-    audit_log.log_action("room.unpin", room_name, user=get_current_user(request) or "admin")
+    await annotations.unpin_room(room_name, project_id=store.request_project_id(request))
+    await audit_log.log_action("room.unpin", room_name, user=get_current_user(request) or "admin")
     if request.headers.get("HX-Request"):
         return Response(content="", status_code=204)
     return RedirectResponse(url="/rooms", status_code=303)
@@ -419,8 +420,8 @@ async def annotate_room(
 ):
     """Save notes and tags for a room"""
     await verify_csrf_token(request)
-    annotations.set_annotations(room_name, note, tags)
-    audit_log.log_action("room.annotate", room_name, user=get_current_user(request) or "admin",
+    await annotations.set_annotations(room_name, note, tags, project_id=store.request_project_id(request))
+    await audit_log.log_action("room.annotate", room_name, user=get_current_user(request) or "admin",
                          details={"tags": tags, "note": note[:80] if note else ""})
     return RedirectResponse(url=f"/rooms/{room_name}", status_code=303)
 

@@ -139,3 +139,63 @@ def test_empty_ingress_stats_shape():
     s = empty_ingress_stats()
     assert s["total_ingress"] == 0
     assert s["active_ingress"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Webhook-derived connection minutes
+# ---------------------------------------------------------------------------
+
+async def _mock_lk():
+    from unittest.mock import AsyncMock, MagicMock
+
+    lk = MagicMock()
+    lk.sip_enabled = False
+    lk.list_rooms = AsyncMock(return_value=([], 0.01))
+    lk.get_all_participants_across_rooms = AsyncMock(return_value=[])
+    lk.get_egress_analytics = AsyncMock(return_value={})
+    lk.get_ingress_analytics = AsyncMock(return_value={})
+    lk.get_enhanced_analytics = AsyncMock(return_value={})
+    return lk
+
+
+async def test_no_provider_leaves_minutes_unsourced():
+    """Default behaviour is unchanged for callers that pass no provider."""
+    from app.services.dashboard import gather_dashboard_stats
+
+    stats = await gather_dashboard_stats(await _mock_lk())
+    assert stats.connection_minutes == 0
+    assert stats.connection_minutes_source == "none"
+
+
+async def test_provider_returning_none_leaves_minutes_unsourced():
+    """None means "no webhook data", which must not render as a real zero."""
+    from app.services.dashboard import gather_dashboard_stats
+
+    async def provider():
+        return None
+
+    stats = await gather_dashboard_stats(await _mock_lk(), usage_provider=provider)
+    assert stats.connection_minutes_source == "none"
+
+
+async def test_provider_value_is_used_and_marked_as_measured():
+    from app.services.dashboard import gather_dashboard_stats
+
+    async def provider():
+        return 1234.7
+
+    stats = await gather_dashboard_stats(await _mock_lk(), usage_provider=provider)
+    assert stats.connection_minutes == 1234
+    assert stats.connection_minutes_source == "webhooks"
+
+
+async def test_a_failing_provider_does_not_break_the_overview():
+    """An analytics failure must never take down the dashboard's front page."""
+    from app.services.dashboard import gather_dashboard_stats
+
+    async def provider():
+        raise RuntimeError("mongo is down")
+
+    stats = await gather_dashboard_stats(await _mock_lk(), usage_provider=provider)
+    assert stats.connection_minutes_source == "none"
+    assert stats.error is None

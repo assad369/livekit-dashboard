@@ -3,6 +3,7 @@
 from fastapi import APIRouter, Depends, Request, Form
 from fastapi.responses import HTMLResponse, RedirectResponse
 
+from app.services import store
 from app.services import audit_log
 from app.security.basic_auth import requires_admin, get_current_user
 from app.security.csrf import get_csrf_token, verify_csrf_token
@@ -13,7 +14,7 @@ router = APIRouter()
 
 @router.get("/audit", response_class=HTMLResponse, dependencies=[Depends(requires_admin)])
 async def audit_index(request: Request):
-    entries = audit_log.list_entries(limit=200)
+    entries = await audit_log.list_entries(limit=200, project_id=store.request_project_id(request))
     return request.app.state.templates.TemplateResponse(
         request,
         "audit/index.html.j2",
@@ -29,5 +30,5 @@ async def audit_index(request: Request):
 @router.post("/audit/clear", dependencies=[Depends(requires_admin)])
 async def clear_audit_log(request: Request, csrf_token: str = Form(...)):
     await verify_csrf_token(request)
-    audit_log.clear()
+    await audit_log.clear(project_id=store.request_project_id(request))
     return RedirectResponse(url="/audit", status_code=303)

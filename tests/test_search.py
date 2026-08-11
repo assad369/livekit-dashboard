@@ -156,8 +156,8 @@ def test_search_route_empty_q_returns_200(client, auth_headers):
     assert resp.status_code == 200
 
 
-def test_search_route_requires_auth(client):
-    resp = client.get("/search?q=hello", follow_redirects=False)
+def test_search_route_requires_auth(unauth_client):
+    resp = unauth_client.get("/search?q=hello", follow_redirects=False)
     assert resp.status_code == 401
 
 
