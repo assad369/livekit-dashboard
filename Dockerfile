@@ -47,13 +47,26 @@ RUN useradd -m -u 1000 appuser && \
 
 USER appuser
 
-# Expose port
+# The listen port is taken from $PORT at runtime so the image works unchanged
+# behind a PaaS proxy (Coolify, Railway, Fly) that picks the port for you.
+# Keep this in sync with the platform's "exposed port" setting — a mismatch
+# gives a healthy container that the proxy cannot reach ("bad gateway").
+ENV PORT=8000
 EXPOSE 8000
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
-    CMD curl -f http://localhost:8000/health || exit 1
+# Probes the same port the app listens on, so it cannot report healthy while
+# the proxy talks to a dead port.
+HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
+    CMD curl -fsS "http://127.0.0.1:${PORT}/health" || exit 1
 
-# Run the application
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Shell form so $PORT expands; `exec` hands PID 1 to uvicorn so SIGTERM reaches
+# it directly and the container stops in ~1s instead of being SIGKILLed after
+# Docker's 10s grace period.
+# --proxy-headers/--forwarded-allow-ips: the app runs behind a reverse proxy,
+# so client IPs and the request scheme come from X-Forwarded-*.
+CMD exec uvicorn app.main:app \
+    --host 0.0.0.0 \
+    --port "${PORT}" \
+    --proxy-headers \
+    --forwarded-allow-ips='*'
 

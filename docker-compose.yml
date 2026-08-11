@@ -1,5 +1,4 @@
-version: "3.8"
-
+# No `version:` key — it is obsolete in Compose v2 and only emits a warning.
 services:
   dashboard:
     build:
@@ -7,7 +6,9 @@ services:
       dockerfile: Dockerfile
     container_name: livekit-dashboard
     ports:
-      - "8000:8000"
+      # Both sides follow $PORT so the published port can never drift from the
+      # port uvicorn actually binds.
+      - "${PORT:-8000}:${PORT:-8000}"
     environment:
       # LiveKit Configuration
       LIVEKIT_URL: ${LIVEKIT_URL:-http://localhost:7880}
@@ -50,13 +51,13 @@ services:
 
     restart: unless-stopped
 
-    # Health check
+    # Health check — CMD-SHELL so $PORT expands inside the container.
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:${PORT:-8000}/health || exit 1"]
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 10s
+      start_period: 40s
 
     # Resource limits (adjust as needed)
     deploy:

@@ -216,7 +216,7 @@ ENABLE_SIP=false
 | `LIVEKIT_BANDWIDTH_METRIC_UP` | ❌  | auto    | Prometheus metric to read upstream bytes from                     |
 | `DEBUG`              | ❌        | `false`    | Enable debug mode                                                 |
 | `HOST`               | ❌        | `0.0.0.0`  | Host to bind to                                                   |
-| `PORT`               | ❌        | `8000`     | Port to listen on                                                 |
+| `PORT`               | ❌        | `8000`     | Port to listen on — in Docker it also drives `EXPOSE`/health check; must match your proxy's exposed port |
 | `ENABLE_SIP`         | ❌        | `false`    | Enable SIP features                                               |
 | `ENABLE_HOMER`       | ❌        | `false`    | Enable Homer SIP Monitor tab                                      |
 | `HOMER_URL`          | ❌*       | -          | Homer server base URL (e.g., `https://homer.example.com`)         |
@@ -553,6 +553,54 @@ docker-compose logs -f
 # Stop services
 docker-compose down
 ```
+
+### Coolify (and other PaaS proxies)
+
+The image reads its listen port from `PORT` (default `8000`). The platform's
+exposed-port setting must match it, or the proxy forwards to a port nothing is
+listening on and every request 502s.
+
+In Coolify, on the application's **General** page:
+
+| Setting                  | Value                                    |
+| ------------------------ | ---------------------------------------- |
+| Ports Exposes            | `8000`                                   |
+| Health Check Path        | `/health`                                |
+| Health Check Port        | `8000` (leave blank to inherit the above) |
+
+If you would rather keep Coolify's `3000` default, set the `PORT=3000`
+environment variable instead and leave Ports Exposes at `3000` — either way the
+two numbers must agree. This is exactly what the deploy-log warning
+`PORT environment variable (8000) does not match configured ports_exposes: 3000`
+is reporting.
+
+**LiveKit on the same server:** `LIVEKIT_URL=http://localhost:7880` does *not*
+work from inside the container — `localhost` is the container itself, not the
+host. Use one of:
+
+- the LiveKit container's name, if both are on the same Docker network
+  (`http://livekit:7880`) — the reliable choice in Coolify;
+- `http://host.docker.internal:7880`, with
+  `extra_hosts: ["host.docker.internal:host-gateway"]`;
+- the server's public URL (`https://livekit.example.com`).
+
+**Container starts and then stops.** Check the exit code first — it names the
+cause:
+
+```bash
+docker ps -a --filter name=<your-app> --format '{{.Names}}\t{{.Status}}'
+docker inspect <container> --format '{{.State.ExitCode}} {{.State.OOMKilled}} {{.State.Error}}'
+docker logs --tail 100 <container>
+```
+
+- `OOMKilled: true` / exit `137` — the box ran out of memory. Self-hosted
+  LiveKit, MongoDB and the dashboard on one small VPS is a tight fit; raise the
+  memory limit or add swap.
+- Exit `3` with `Application startup failed. Exiting.` in the logs — a
+  lifespan failure. The only fatal one is `MONGODB_REQUIRED=true` with an
+  unreachable MongoDB; set it to `false` to boot degraded instead.
+- Exits right after `unhealthy` — the health check is probing the wrong port.
+  See the table above.
 
 ## 🧪 Testing
 
