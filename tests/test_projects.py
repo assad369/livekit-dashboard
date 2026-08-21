@@ -57,6 +57,43 @@ def test_env_project_is_none_when_incomplete(monkeypatch):
     assert project_service.env_project() is None
 
 
+def test_env_project_repairs_a_mangled_url(monkeypatch):
+    # A hand-edited .env can lose the slashes after the scheme; the SDK turns
+    # that into https:///... and every API call fails with an invalid URL.
+    monkeypatch.setenv("LIVEKIT_URL", r"wss:\/\/sr.livekit.cloud")
+    project = project_service.env_project()
+    assert project is not None
+    assert project.livekit_url == "wss://sr.livekit.cloud"
+
+
+def test_env_project_is_none_when_url_has_no_scheme(monkeypatch, caplog):
+    monkeypatch.setenv("LIVEKIT_URL", "sr.livekit.cloud")
+    with caplog.at_level("ERROR"):
+        assert project_service.env_project() is None
+    assert "LIVEKIT_URL is malformed" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# URL normalization
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("raw, expected", [
+    (r"wss:\/\/host", "wss://host"),
+    ("wss:host", "wss://host"),
+    ("wss:/host", "wss://host"),
+    ('"wss://host"', "wss://host"),
+    ("'wss://host'", "wss://host"),
+    ("  wss://host  ", "wss://host"),
+    ("wss://host/", "wss://host"),
+    ("http://localhost:7880", "http://localhost:7880"),
+    ("wss://host/sub/path", "wss://host/sub/path"),
+    ("garbage", "garbage"),
+    ("", ""),
+])
+def test_normalize_livekit_url(raw, expected):
+    assert project_service.normalize_livekit_url(raw) == expected
+
+
 # ---------------------------------------------------------------------------
 # Secrets at rest
 # ---------------------------------------------------------------------------
@@ -140,6 +177,20 @@ async def test_validation(db, kwargs, message):
 async def test_trailing_slash_is_stripped(db):
     project = await _make(db, url="wss://lk.example.com/")
     assert project.livekit_url == "wss://lk.example.com"
+
+
+async def test_pasted_url_with_escaped_slashes_is_accepted(db):
+    project = await _make(db, url=r"wss:\/\/lk.example.com")
+    assert project.livekit_url == "wss://lk.example.com"
+
+
+async def test_update_normalizes_the_url(db):
+    project = await _make(db)
+    updated = await project_service.update_project(
+        db, project.id, name=project.name, livekit_url=r"wss:\/\/moved.example.com/",
+        api_key=project.api_key,
+    )
+    assert updated.livekit_url == "wss://moved.example.com"
 
 
 # ---------------------------------------------------------------------------

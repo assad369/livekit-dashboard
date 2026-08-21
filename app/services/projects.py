@@ -77,6 +77,34 @@ def slugify(name: str) -> str:
     return slug or "project"
 
 
+URL_SCHEMES = ("ws://", "wss://", "http://", "https://")
+
+
+def normalize_livekit_url(url: str) -> str:
+    """Clean a user- or env-supplied LiveKit URL.
+
+    Hand-edited `.env` files and copy-paste produce URLs the LiveKit SDK cannot
+    parse: it runs them through `urlparse` and rebuilds `scheme://netloc/path`,
+    so `wss:\\/\\/host` becomes `https:///\\/\\/host` and every API call fails
+    with an invalid-URL error rather than anything diagnosable.
+
+    Repairs only unambiguous damage — wrapping quotes, whitespace,
+    JSON-escaped slashes, missing slashes after the scheme, a trailing slash.
+    A value with no recognisable scheme is returned unchanged so it still fails
+    validation instead of being guessed at.
+    """
+    cleaned = url.strip()
+    for quote in ('"', "'"):
+        if len(cleaned) >= 2 and cleaned[0] == quote and cleaned[-1] == quote:
+            cleaned = cleaned[1:-1].strip()
+            break
+
+    cleaned = cleaned.replace("\\/", "/")
+    # `wss:host` / `wss:/host` — a scheme whose slashes were lost in editing.
+    cleaned = re.sub(r"^(ws|wss|http|https):/{0,1}(?=[^/])", r"\1://", cleaned)
+    return cleaned.rstrip("/")
+
+
 async def _unique_slug(db, name: str, *, exclude_id: str | None = None) -> str:
     base = slugify(name)
     candidate = base
@@ -96,10 +124,22 @@ async def _unique_slug(db, name: str, *, exclude_id: str | None = None) -> str:
 
 def env_project() -> Optional[Project]:
     """Build a Project from LIVEKIT_* env vars, or None if they are not set."""
-    url = os.environ.get("LIVEKIT_URL", "")
+    raw_url = os.environ.get("LIVEKIT_URL", "")
     key = os.environ.get("LIVEKIT_API_KEY", "")
     secret = os.environ.get("LIVEKIT_API_SECRET", "")
-    if not (url and key and secret):
+    if not (raw_url and key and secret):
+        return None
+
+    # Unlike projects created in the UI, env vars bypass `_validate`. Without
+    # this check a malformed URL surfaces only as a connection error on every
+    # poll, forever; better to report it once and act unconfigured.
+    url = normalize_livekit_url(raw_url)
+    if not url.startswith(URL_SCHEMES):
+        logger.error(
+            "LIVEKIT_URL is malformed: %r — expected e.g. "
+            "wss://your-project.livekit.cloud or http://localhost:7880",
+            raw_url,
+        )
         return None
 
     return Project(
@@ -235,7 +275,7 @@ def _validate(name: str, livekit_url: str, api_key: str, api_secret: str) -> Non
         raise ProjectError("Name is required.")
     if not livekit_url.strip():
         raise ProjectError("LiveKit URL is required.")
-    if not livekit_url.startswith(("ws://", "wss://", "http://", "https://")):
+    if not livekit_url.startswith(URL_SCHEMES):
         raise ProjectError("LiveKit URL must start with ws://, wss://, http:// or https://.")
     if not api_key.strip():
         raise ProjectError("API key is required.")
@@ -265,6 +305,7 @@ async def create_project(
     if db is None:
         raise ProjectError("A database is required to create projects. Set MONGODB_URI.")
 
+    livekit_url = normalize_livekit_url(livekit_url)
     _validate(name, livekit_url, api_key, api_secret)
 
     error = crypto.configuration_error()
@@ -280,7 +321,7 @@ async def create_project(
     doc = {
         "name": name.strip(),
         "slug": await _unique_slug(db, name),
-        "livekit_url": livekit_url.strip().rstrip("/"),
+        "livekit_url": livekit_url,  # already normalized above
         "api_key": api_key.strip(),
         "api_secret_enc": crypto.encrypt(api_secret),
         "sip_enabled": bool(sip_enabled),
@@ -321,11 +362,12 @@ async def update_project(
 
     # Validate against the effective secret so "leave unchanged" is not
     # mistaken for "no secret set".
+    livekit_url = normalize_livekit_url(livekit_url)
     _validate(name, livekit_url, api_key, api_secret or "unchanged")
 
     updates: dict[str, Any] = {
         "name": name.strip(),
-        "livekit_url": livekit_url.strip().rstrip("/"),
+        "livekit_url": livekit_url,  # already normalized above
         "api_key": api_key.strip(),
         "sip_enabled": bool(sip_enabled),
         "prometheus_url": prometheus_url.strip(),

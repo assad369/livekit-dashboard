@@ -27,6 +27,7 @@ from app.security.session_auth import AuthMiddleware
 from app.utils.formatters import format_duration, format_pct, status_color, format_number
 from app.db import mongo
 from app.services import lk_pool, prom_collector, usage
+from app.services.projects import URL_SCHEMES, normalize_livekit_url
 from app.services.users import bootstrap_admin, using_default_password
 
 
@@ -35,7 +36,9 @@ async def lifespan(app: FastAPI):
     """Lifespan context manager for startup/shutdown events"""
     # Startup
     print("🚀 LiveKit Dashboard starting up...")
-    print(f"   LiveKit URL: {os.environ.get('LIVEKIT_URL', 'Not set')}")
+    raw_url = os.environ.get("LIVEKIT_URL", "")
+    # Show what will actually be dialed, not the raw env text.
+    print(f"   LiveKit URL: {normalize_livekit_url(raw_url) if raw_url else 'Not set'}")
     print(f"   SIP Enabled: {os.environ.get('ENABLE_SIP', 'false')}")
     print(f"   Homer Enabled: {os.environ.get('ENABLE_HOMER', 'false')}")
 
@@ -45,6 +48,9 @@ async def lifespan(app: FastAPI):
 
     if missing_vars:
         print(f"⚠️  WARNING: Missing required environment variables: {', '.join(missing_vars)}")
+    elif not normalize_livekit_url(raw_url).startswith(URL_SCHEMES):
+        print(f"⚠️  WARNING: LIVEKIT_URL is malformed: {raw_url!r}")
+        print("    Expected e.g. wss://your-project.livekit.cloud or http://localhost:7880")
     else:
         print("✅ All required environment variables are set")
 
