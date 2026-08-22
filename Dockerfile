@@ -52,6 +52,10 @@ USER appuser
 # Keep this in sync with the platform's "exposed port" setting — a mismatch
 # gives a healthy container that the proxy cannot reach ("bad gateway").
 ENV PORT=8000
+# Without this, stdout is block-buffered (not a TTY inside Docker), so
+# startup/crash logs can be delayed or lost if the process exits abruptly —
+# exactly the logs needed to debug a restart loop.
+ENV PYTHONUNBUFFERED=1
 EXPOSE 8000
 
 # Probes the same port the app listens on, so it cannot report healthy while

@@ -21,11 +21,32 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from typing import Any, Optional
+from urllib.parse import urlsplit
 
 from fastapi import HTTPException, status
 
 logger = logging.getLogger(__name__)
+
+
+def _redact_uri(uri: str) -> str:
+    """Strip credentials from a mongodb(+srv):// URI so it is safe to log.
+
+    Connection failures are the main thing operators need in the deployment
+    log to debug "wrong host" vs "wrong network" vs "bad auth" — but the raw
+    URI contains the password, so it must never be logged as-is.
+    """
+    return re.sub(r"//[^@/]+@", "//***:***@", uri)
+
+
+def _target_host(uri: str) -> str:
+    """Host(s) the client will dial, for logging. Falls back to the redacted URI."""
+    try:
+        netloc = urlsplit(uri).netloc
+        return netloc.split("@")[-1] or "(unknown host)"
+    except Exception:
+        return _redact_uri(uri)
 
 
 DEFAULT_DB_NAME = "livekit_dashboard"
@@ -83,6 +104,11 @@ async def connect() -> None:
 
     uri = os.environ["MONGODB_URI"]
     timeout_ms = int(os.environ.get("MONGODB_TIMEOUT_MS", "5000"))
+    target = _target_host(uri)
+    logger.info(
+        "Connecting to MongoDB at %s (db=%s, timeoutMs=%s, required=%s)",
+        target, db_name(), timeout_ms, is_required(),
+    )
     try:
         _client = AsyncMongoClient(
             uri,
@@ -94,14 +120,23 @@ async def connect() -> None:
         await _client.admin.command("ping")
         _db = _client[db_name()]
         _state["connected"] = True
-        logger.info("MongoDB connected (db=%s)", db_name())
+        logger.info("MongoDB connected (host=%s, db=%s)", target, db_name())
     except Exception as exc:
         _client = None
         _db = None
         _state["error"] = str(exc)
+        logger.error(
+            "MongoDB connection failed (host=%s, db=%s, timeoutMs=%s): %s: %s",
+            target, db_name(), timeout_ms, type(exc).__name__, exc,
+        )
         if is_required():
+            logger.critical(
+                "MONGODB_REQUIRED=true and MongoDB is unreachable — refusing to start. "
+                "If this is a Coolify-internal MongoDB, verify the app and database "
+                "share a network and the host/port/credentials in MONGODB_URI match "
+                "the internal service (not localhost/127.0.0.1)."
+            )
             raise RuntimeError(f"MONGODB_REQUIRED=true but connection failed: {exc}") from exc
-        logger.error("MongoDB unavailable, continuing without it: %s", exc)
         return
 
     await ensure_indexes(_db)

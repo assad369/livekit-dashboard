@@ -4,6 +4,7 @@ Stateless SSR dashboard for LiveKit server management
 """
 
 import asyncio
+import logging
 import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -11,6 +12,14 @@ from dotenv import load_dotenv
 
 # Load environment variables from .env file
 load_dotenv()
+
+# Without this, module-level `logging.getLogger(__name__)` calls throughout
+# the app (e.g. app.db.mongo's connection logging) have no handler attached
+# and are silently dropped instead of reaching Docker/Coolify's log output.
+logging.basicConfig(
+    level=os.environ.get("LOG_LEVEL", "INFO").upper(),
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
 
 from fastapi import FastAPI, Request
 from fastapi.staticfiles import StaticFiles
