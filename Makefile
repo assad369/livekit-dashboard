@@ -20,11 +20,11 @@ install: ## Install dependencies using Poetry
 
 run: ## Run the application in production mode
 	@echo "$(BLUE)Starting LiveKit Dashboard...$(NC)"
-	poetry run uvicorn app.main:app --host 0.0.0.0 --port 4000
+	poetry run uvicorn app.main:app --host 0.0.0.0 --port 8000
 
 dev: ## Run the application in development mode with auto-reload
 	@echo "$(BLUE)Starting LiveKit Dashboard in development mode...$(NC)"
-	poetry run uvicorn app.main:app --host 0.0.0.0 --port 4000 --reload
+	poetry run uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 
 test: ## Run tests with pytest
 	@echo "$(BLUE)Running tests...$(NC)"
@@ -61,7 +61,7 @@ docker-build: ## Build Docker image
 docker-run: ## Run application using Docker Compose
 	@echo "$(BLUE)Starting LiveKit Dashboard with Docker Compose...$(NC)"
 	docker-compose up -d
-	@echo "$(GREEN)Dashboard is running at http://localhost:4000$(NC)"
+	@echo "$(GREEN)Dashboard is running at http://localhost:8000$(NC)"
 
 docker-stop: ## Stop Docker Compose services
 	@echo "$(BLUE)Stopping Docker services...$(NC)"
@@ -92,7 +92,7 @@ env-example: ## Create .env file from .env.example
 		echo "APP_ENCRYPTION_KEY=$$(openssl rand -base64 32)" >> .env; \
 		echo "DEBUG=false" >> .env; \
 		echo "HOST=0.0.0.0" >> .env; \
-		echo "PORT=4000" >> .env; \
+		echo "PORT=8000" >> .env; \
 		echo "# Set to false when serving over plain HTTP locally." >> .env; \
 		echo "SESSION_HTTPS_ONLY=true" >> .env; \
 		echo "" >> .env; \
@@ -115,4 +115,4 @@ check: lint test ## Run all checks (lint + test)
 	@echo "$(GREEN)All checks passed!$(NC)"
 
 server-up:
-	@poetry run uvicorn app.main:app --host 0.0.0.0 --port 4000 --reload
+	@poetry run uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
